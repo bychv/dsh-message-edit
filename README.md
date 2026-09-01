@@ -10,7 +10,7 @@
 dsh plugin --profile web add github:bychv/dsh-message-edit#main
 ```
 
-当前预发布版本为 `0.2.4-alpha.1`，面向 DeepSeek Harness `0.1.2-alpha.3`。
+当前预发布版本为 `0.2.4-alpha.2`，面向 DeepSeek Harness `0.1.2-alpha.4`。
 
 ## 功能
 
@@ -82,7 +82,7 @@ interface MessageEditVersionEvent {
 }
 ```
 
-会话头的 `parentSession` 构成版本树，且必须与事件中的 `inverse.sessionId` 一致；`seedLength` 区分当前版本自己的元数据与从祖先继承的同名事件。Timeline 通过 `ctx.sessionQuery.traceSession()` 和 `readSession()` 生成完整值级投影，并由原子逆链导出 `undoStack` 与直接 `redoSessionIds`。旧版平面事件仍可读取，并在投影时规范化为同一效果对。
+会话头的 `parentSession` 构成版本树，且必须与事件中的 `inverse.sessionId` 一致；继承边界（0.1.2-alpha.4 的 `isSeeded`/`inheritedEventCount`，落盘仍写作 `seedLength`）区分当前版本自己的元数据与从祖先继承的同名事件。Timeline 通过 `ctx.sessionQuery.traceSession()` 和 `readSession()` 生成完整值级投影，并由原子逆链导出 `undoStack` 与直接 `redoSessionIds`。旧版平面事件仍可读取，并在投影时规范化为同一效果对。
 
 ## UI
 
@@ -103,7 +103,7 @@ npm install
 npm run build
 ```
 
-构建基于 npm 发布的 `@deepseek-ai/*@0.1.2-alpha.3` 类型与本地工具链（typescript、tsdown、lightningcss），不再依赖 dsh 源码树。构建生成：
+构建基于 npm 发布的 `@deepseek-ai/*@0.1.2-alpha.4` 类型与本地工具链（typescript、tsdown、lightningcss），不再依赖 dsh 源码树。构建生成：
 
 - `index.mjs`：Host 插件
 - `client.js`：Browser 插件

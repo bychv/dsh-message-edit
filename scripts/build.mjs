@@ -7,7 +7,7 @@ const pluginRoot = fileURLToPath(new URL('..', import.meta.url))
 
 function run(command, args) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { cwd: pluginRoot, stdio: 'inherit', env: process.env })
+    const child = spawn(command, args, { cwd: pluginRoot, stdio: 'inherit', env: process.env, shell: process.platform === 'win32' })
     child.once('error', reject)
     child.once('exit', (code, signal) => {
       if (code === 0) {

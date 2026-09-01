@@ -415,15 +415,15 @@ window.__ModuleLoader__.load({
 			document.head.appendChild(tag);
 		}
 		var InlineMessageEdit_module_css_default = {
+			"pickerItem": "LRkRdW_pickerItem",
 			"picker": "LRkRdW_picker",
-			"overlay": "LRkRdW_overlay",
-			"pickerItemActive": "LRkRdW_pickerItemActive",
 			"title": "LRkRdW_title",
 			"input": "LRkRdW_input",
-			"panel": "LRkRdW_panel",
+			"footer": "LRkRdW_footer",
 			"iconButton": "LRkRdW_iconButton",
-			"pickerItem": "LRkRdW_pickerItem",
-			"footer": "LRkRdW_footer"
+			"overlay": "LRkRdW_overlay",
+			"panel": "LRkRdW_panel",
+			"pickerItemActive": "LRkRdW_pickerItemActive"
 		};
 		//#endregion
 		//#region src/client/InlineMessageEdit.tsx
@@ -716,10 +716,10 @@ window.__ModuleLoader__.load({
 			document.head.appendChild(tag);
 		}
 		var MessageEditHeader_module_css_default = {
-			"rerollButton": "kmIVpW_rerollButton",
-			"root": "kmIVpW_root",
 			"iconButton": "kmIVpW_iconButton",
-			"counter": "kmIVpW_counter"
+			"counter": "kmIVpW_counter",
+			"rerollButton": "kmIVpW_rerollButton",
+			"root": "kmIVpW_root"
 		};
 		//#endregion
 		//#region src/client/MessageEditHeader.tsx
@@ -795,54 +795,54 @@ window.__ModuleLoader__.load({
 		}
 		var MessageEditTimelineView_module_css_default = {
 			"versionItem": "pdbLWq_versionItem",
-			"pageHeader": "pdbLWq_pageHeader",
 			"title": "pdbLWq_title",
-			"cascadeField": "pdbLWq_cascadeField",
-			"empty": "pdbLWq_empty",
-			"effectControls": "pdbLWq_effectControls",
-			"versionMain": "pdbLWq_versionMain",
-			"versionDiff": "pdbLWq_versionDiff",
-			"root": "pdbLWq_root",
-			"turnsPanel": "pdbLWq_turnsPanel",
-			"editorHint": "pdbLWq_editorHint",
-			"headerActions": "pdbLWq_headerActions",
-			"sectionHeading": "pdbLWq_sectionHeading",
-			"primaryButton": "pdbLWq_primaryButton",
-			"notice": "pdbLWq_notice",
-			"effectDepth": "pdbLWq_effectDepth",
-			"count": "pdbLWq_count",
-			"currentBadge": "pdbLWq_currentBadge",
-			"turnHeader": "pdbLWq_turnHeader",
-			"editorActions": "pdbLWq_editorActions",
-			"turnPreview": "pdbLWq_turnPreview",
 			"messageText": "pdbLWq_messageText",
-			"messageHeader": "pdbLWq_messageHeader",
-			"editor": "pdbLWq_editor",
-			"pathBadge": "pdbLWq_pathBadge",
-			"secondaryButton": "pdbLWq_secondaryButton",
 			"columns": "pdbLWq_columns",
-			"turnTitle": "pdbLWq_turnTitle",
-			"versionButton": "pdbLWq_versionButton",
-			"turnList": "pdbLWq_turnList",
-			"versionList": "pdbLWq_versionList",
-			"select": "pdbLWq_select",
-			"versionTitle": "pdbLWq_versionTitle",
-			"status": "pdbLWq_status",
-			"intro": "pdbLWq_intro",
-			"effectButtons": "pdbLWq_effectButtons",
-			"versionDot": "pdbLWq_versionDot",
-			"subtitle": "pdbLWq_subtitle",
-			"error": "pdbLWq_error",
-			"textarea": "pdbLWq_textarea",
-			"versionMeta": "pdbLWq_versionMeta",
 			"turnSection": "pdbLWq_turnSection",
-			"messageList": "pdbLWq_messageList",
-			"textButton": "pdbLWq_textButton",
+			"editorHint": "pdbLWq_editorHint",
+			"turnsPanel": "pdbLWq_turnsPanel",
 			"messageCard": "pdbLWq_messageCard",
-			"messageTime": "pdbLWq_messageTime",
-			"versionsPanel": "pdbLWq_versionsPanel",
+			"cascadeField": "pdbLWq_cascadeField",
+			"versionMain": "pdbLWq_versionMain",
+			"notice": "pdbLWq_notice",
+			"sectionHeading": "pdbLWq_sectionHeading",
+			"empty": "pdbLWq_empty",
+			"textButton": "pdbLWq_textButton",
+			"error": "pdbLWq_error",
+			"turnList": "pdbLWq_turnList",
 			"versionLine": "pdbLWq_versionLine",
-			"kindBadge": "pdbLWq_kindBadge"
+			"versionTitle": "pdbLWq_versionTitle",
+			"versionMeta": "pdbLWq_versionMeta",
+			"versionButton": "pdbLWq_versionButton",
+			"versionsPanel": "pdbLWq_versionsPanel",
+			"secondaryButton": "pdbLWq_secondaryButton",
+			"effectControls": "pdbLWq_effectControls",
+			"effectDepth": "pdbLWq_effectDepth",
+			"effectButtons": "pdbLWq_effectButtons",
+			"textarea": "pdbLWq_textarea",
+			"pageHeader": "pdbLWq_pageHeader",
+			"subtitle": "pdbLWq_subtitle",
+			"select": "pdbLWq_select",
+			"turnTitle": "pdbLWq_turnTitle",
+			"primaryButton": "pdbLWq_primaryButton",
+			"versionDot": "pdbLWq_versionDot",
+			"versionDiff": "pdbLWq_versionDiff",
+			"currentBadge": "pdbLWq_currentBadge",
+			"kindBadge": "pdbLWq_kindBadge",
+			"turnPreview": "pdbLWq_turnPreview",
+			"turnHeader": "pdbLWq_turnHeader",
+			"intro": "pdbLWq_intro",
+			"pathBadge": "pdbLWq_pathBadge",
+			"headerActions": "pdbLWq_headerActions",
+			"messageHeader": "pdbLWq_messageHeader",
+			"messageList": "pdbLWq_messageList",
+			"status": "pdbLWq_status",
+			"versionList": "pdbLWq_versionList",
+			"editorActions": "pdbLWq_editorActions",
+			"messageTime": "pdbLWq_messageTime",
+			"editor": "pdbLWq_editor",
+			"root": "pdbLWq_root",
+			"count": "pdbLWq_count"
 		};
 		//#endregion
 		//#region src/client/MessageEditTimelineView.tsx
