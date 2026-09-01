@@ -1,7 +1,7 @@
 /** Host half of Message Edit: turn-atomic forks and structurally reversible versions. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentOptions, AgentSetup } from '@deepseek-ai/dsh-agent'
-import type { PresetBearingSession } from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-agent-presets'
 import type {
   SessionId,
   Session,
@@ -442,7 +442,13 @@ function appendLogSeedEvent<T extends Exclude<SessionEventType, SurfaceEventType
   type: T,
   data: SessionEvent<T>['data'],
 ): void {
-  events.push({ type, seq: events.length, time: Date.now(), data } as SessionEvent<T>)
+  events.push({
+    type,
+    seq: events.length,
+    time: Date.now(),
+    data,
+    ...(type.startsWith('message-edit/') ? { ignorable: true as const } : {}),
+  } as SessionEvent<T>)
 }
 
 function appendSurfaceSeedEvent<T extends SurfaceEventType>(
@@ -485,7 +491,7 @@ function versionSeed(source: Session, plan: OperationPlan): {
   return { events, inheritedLength }
 }
 
-function sessionPreset(session: PresetBearingSession): string | undefined {
+function sessionPreset(session: Session): string | undefined {
   for (let index = session.events.length - 1; index >= 0; index -= 1) {
     const event = session.events[index]
     if (event?.type === 'agent-preset/selected') return event.data.agentPreset

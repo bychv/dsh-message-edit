@@ -4,11 +4,13 @@
 [![npm downloads](https://img.shields.io/npm/dm/dsh-message-edit)](https://www.npmjs.com/package/dsh-message-edit)
 [![license](https://img.shields.io/npm/l/dsh-message-edit)](LICENSE)
 
-`dsh-message-edit`（[npm](https://www.npmjs.com/package/dsh-message-edit) · [GitHub](https://github.com/Moeblack/dsh-message-edit)）为 DeepSeek Harness 补充基于事件溯源的「消息编辑与重生成」能力。插件不改写历史事件，也不修改 DSH 引擎内部；每次编辑、重生成或重试都会从目标回合之前创建一个新会话版本，原会话始终保留并可随时切回。
+`dsh-message-edit`（[npm](https://www.npmjs.com/package/dsh-message-edit) · [GitHub](https://github.com/bychv/dsh-message-edit)）为 DeepSeek Harness 补充基于事件溯源的「消息编辑与重生成」能力。插件不改写历史事件，也不修改 DSH 引擎内部；每次编辑、重生成或重试都会从目标回合之前创建一个新会话版本，原会话始终保留并可随时切回。
 
 ```bash
-dsh plugin --profile web add dsh-message-edit
+dsh plugin --profile web add github:bychv/dsh-message-edit#main
 ```
+
+当前预发布版本为 `0.2.4-alpha.1`，面向 DeepSeek Harness `0.1.2-alpha.3`。
 
 ## 功能
 
@@ -54,6 +56,11 @@ dsh plugin --profile web add dsh-message-edit
 
 每个插件版本在自己的非继承后缀中包含一个 `message-edit/version` 事件：
 
+该插件自定义事件在 seed 信封中带有 `ignorable: true`。这样 DeepSeek Harness 0.1.2-alpha
+及其他启用未知事件保护的版本可以安全跳过不认识的 `message-edit/*` 事件，冷启动或重新加载时
+不会因插件事件被判定为不支持而拒绝整段会话历史。核心 `turn/*`、`step/*` 等事件不会被标记为
+可忽略。
+
 ```ts
 interface MessageEditVersionEvent {
   schemaVersion: 2
@@ -96,7 +103,7 @@ npm install
 npm run build
 ```
 
-构建基于 npm 发布的 `@deepseek-ai/*@0.1.0-rc.6` 类型与本地工具链（typescript、tsdown、lightningcss），不再依赖 dsh 源码树。构建生成：
+构建基于 npm 发布的 `@deepseek-ai/*@0.1.2-alpha.3` 类型与本地工具链（typescript、tsdown、lightningcss），不再依赖 dsh 源码树。构建生成：
 
 - `index.mjs`：Host 插件
 - `client.js`：Browser 插件
@@ -105,8 +112,10 @@ npm run build
 ## 安装
 
 ```bash
-dsh plugin --profile web add dsh-message-edit
+dsh plugin --profile web add github:bychv/dsh-message-edit#main
 ```
+
+该命令直接安装此 fork 的当前 alpha 兼容版本。安装完成后重启 dsh；如曾安装 npm 稳定版，`add` 会将 web profile 中的依赖来源更新为该 GitHub 仓库。
 
 或本地开发：
 

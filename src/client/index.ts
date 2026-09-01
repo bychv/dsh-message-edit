@@ -1,6 +1,10 @@
 /** Message Edit browser half: Timeline view and compact conversation-header controls. */
-import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type { SessionId } from '@deepseek-ai/dsh-session'
+import type {} from '@deepseek-ai/dsh-client-connection/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import { MESSAGE_EDIT_VIEW_ORDER } from '../shared.ts'
 import { MessageEditController } from './controller.ts'
 import { MessageEditHeader } from './MessageEditHeader.tsx'

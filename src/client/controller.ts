@@ -1,15 +1,13 @@
 /** Browser controller for one session's Timeline projection and branch mutations. */
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {
-  ClientContext,
-  ConversationSnapshot,
   ISessions,
-  ObservableSnapshot,
-  SessionFace,
-  SessionId,
+  SessionEventSource,
   SessionListState,
-  SnapshotStore,
-} from '@deepseek-ai/dsh-client-runtime/client'
-import { createSnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+} from '@deepseek-ai/dsh-api-session-controller/client'
+import type { ObservableSnapshot, SnapshotStore } from '@deepseek-ai/dsh-client-store'
+import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import {
   MESSAGE_EDIT_PATH,
   type CascadePolicy,
@@ -175,13 +173,6 @@ async function responseValue(response: Response): Promise<unknown> {
   throw new Error(typeof error === 'string' ? error : `请求失败：HTTP ${String(response.status)}`)
 }
 
-function conversationRevision(snapshot: ConversationSnapshot): string {
-  const turnEnds = [...snapshot.turnEnds.entries()]
-    .map(([turn, seq]) => `${String(turn)}:${String(seq)}`)
-    .join(',')
-  return [snapshot.openState, snapshot.removed, snapshot.hasMore, turnEnds].join('|')
-}
-
 function lineageRevision(snapshot: SessionListState, sessionId: SessionId): string {
   let root = sessionId
   const ancestorIds = new Set<SessionId>()
@@ -222,9 +213,9 @@ export class MessageEditController {
   private generation = 0
   private readonly ctx: ClientContext
   private readonly sessions: ISessions
-  private sessionSource: SessionFace | undefined
+  private sessionSource: SessionEventSource | undefined
   private sessionSourceDispose: (() => void) | undefined
-  private sessionRevision: string | undefined
+  private sessionRevision: number | undefined
   private listRevision = ''
   private refreshScheduled = false
   private refreshTimer: ReturnType<typeof setTimeout> | undefined
@@ -332,14 +323,14 @@ export class MessageEditController {
   }
 
   private bindSessionSource(): boolean {
-    const source = this.sessions.binding(this.sessionId)?.session
+    const source = this.sessions.binding(this.sessionId)?.eventSource
     if (source === this.sessionSource) return false
     this.sessionSourceDispose?.()
     this.sessionSource = source
-    this.sessionRevision = source === undefined ? undefined : conversationRevision(source.getSnapshot())
+    this.sessionRevision = source?.getSnapshot().revision
     this.sessionSourceDispose = source?.subscribe(() => {
       if (this.sessionSource !== source) return
-      const revision = conversationRevision(source.getSnapshot())
+      const revision = source.getSnapshot().revision
       if (revision === this.sessionRevision) return
       this.sessionRevision = revision
       this.invalidate()
