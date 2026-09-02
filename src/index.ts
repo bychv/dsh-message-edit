@@ -9,8 +9,8 @@ import type {
   SessionEventType,
   SurfaceEventType,
   SurfaceIntent,
+  SessionLogOffset,
 } from '@deepseek-ai/dsh-session'
-import { SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type {
   SessionLineageNode,
   SessionRecord,
@@ -484,10 +484,12 @@ function appendManualTurn(events: SessionEvent[], manual: ManualAssistantTurn): 
 
 function versionSeed(source: Session, plan: OperationPlan): {
   events: SessionEvent[]
-  inheritedLength: number
+  inheritedLength: SessionLogOffset
 } {
   const events = inheritedSeed(source, plan.boundary)
-  const inheritedLength = events.length
+  // Array length is already a non-negative safe integer. Keep the brand type-only:
+  // profile-local DSH peers may lag behind the services supplied by the host CLI.
+  const inheritedLength = events.length as SessionLogOffset
   appendLogSeedEvent(events, 'message-edit/version', plan.version)
   if (plan.manualTurn !== undefined) appendManualTurn(events, plan.manualTurn)
   return { events, inheritedLength }
@@ -529,7 +531,7 @@ async function createVersionAgent(
       ...seeded ? { isSeeded: true } : {},
       ...agentPreset === undefined ? {} : { agentPreset },
     },
-    ...seeded ? { inheritedEventCount: SessionLogOffset(seed.inheritedLength) } : {},
+    ...seeded ? { inheritedEventCount: seed.inheritedLength } : {},
     agentOptions: options,
     ...setup === undefined ? {} : { setup },
   })

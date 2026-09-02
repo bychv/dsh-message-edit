@@ -10,7 +10,12 @@
 dsh plugin --profile web add github:bychv/dsh-message-edit#main
 ```
 
-当前预发布版本为 `0.2.4-alpha.2`，面向 DeepSeek Harness `0.1.2-alpha.4`。
+当前预发布版本为 `0.2.4-alpha.3`，面向 DeepSeek Harness `0.1.2-alpha.5`。
+
+Host 通过 DSH 注入的服务运行，`SessionLogOffset` 仅作为编译期类型使用，不在运行时从
+profile 的 `@deepseek-ai/dsh-session` 导入。这避免了 CLI 已升级、profile 尚保留旧 peer
+时出现 `does not provide an export named 'SessionLogOffset'` 并阻止 DSH 启动。
+这不表示支持所有旧 DSH API；请以以上版本为运行和测试基准。
 
 ## 功能
 
@@ -103,11 +108,14 @@ npm install
 npm run build
 ```
 
-构建基于 npm 发布的 `@deepseek-ai/*@0.1.2-alpha.4` 类型与本地工具链（typescript、tsdown、lightningcss），不再依赖 dsh 源码树。构建生成：
+构建基于 npm 发布的 `@deepseek-ai/*@0.1.2-alpha.5` 类型与本地工具链（typescript、tsdown、lightningcss），不再依赖 dsh 源码树。构建生成：
 
 - `index.mjs`：Host 插件
 - `client.js`：Browser 插件
 - `client.js.map`：Browser source map
+
+运行 `npm test` 会先重新构建，再检查旧 profile peer 下的 Host 加载、真实 Session seed
+验证、分支继承边界、`ignorable` 标记、历史冷读及 retry 输入保留；测试不调用模型、不写用户历史。
 
 ## 安装
 

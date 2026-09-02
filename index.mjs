@@ -1,4 +1,3 @@
-import { SessionLogOffset } from "@deepseek-ai/dsh-session";
 //#region src/shared.ts
 /** Same-origin endpoint owned by the Message Edit host plugin. */
 const MESSAGE_EDIT_PATH = "/message-edit";
@@ -354,7 +353,7 @@ async function createVersionAgent(ctx, source, childId, plan, options) {
 			...seeded ? { isSeeded: true } : {},
 			...agentPreset === void 0 ? {} : { agentPreset }
 		},
-		...seeded ? { inheritedEventCount: SessionLogOffset(seed.inheritedLength) } : {},
+		...seeded ? { inheritedEventCount: seed.inheritedLength } : {},
 		agentOptions: options,
 		...setup === void 0 ? {} : { setup }
 	});
