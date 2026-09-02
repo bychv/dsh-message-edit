@@ -1,16 +1,22 @@
-# DSH Message Edit
+# DSH Message Edit（个人自用 fork）
 
-[![npm version](https://img.shields.io/npm/v/dsh-message-edit)](https://www.npmjs.com/package/dsh-message-edit)
-[![npm downloads](https://img.shields.io/npm/dm/dsh-message-edit)](https://www.npmjs.com/package/dsh-message-edit)
-[![license](https://img.shields.io/npm/l/dsh-message-edit)](LICENSE)
+> 本仓库是由 bychv 为个人自用维护的 fork，并非上游主仓库，也不是 DeepSeek 官方项目。修改主要服务于维护者自己的使用环境，不代表上游的发布、支持或兼容性承诺。
 
-`dsh-message-edit`（[npm](https://www.npmjs.com/package/dsh-message-edit) · [GitHub](https://github.com/bychv/dsh-message-edit)）为 DeepSeek Harness 补充基于事件溯源的「消息编辑与重生成」能力。插件不改写历史事件，也不修改 DSH 引擎内部；每次编辑、重生成或重试都会从目标回合之前创建一个新会话版本，原会话始终保留并可随时切回。
+本 fork 维护者的相关开发经验相对有限，时间和精力也不一定足以实时跟进 DeepSeek Harness 最新版本的兼容性变化，因此无法保证及时适配或修复问题。
+
+如果你需要消息编辑、重试与会话分支等类似功能，也推荐了解 [morlay/better-session](https://github.com/morlay/better-session)。它可能在维护和版本跟进方面比本仓库更完善，建议根据自身需求一并评估；实际维护状态、支持版本和安装方式请以该项目的最新说明为准，这里不对其更新速度或兼容性作保证。
+
+两者并非完全等价：根据 better-session 的项目说明，它采用 RDB 持久化，编辑和重试会就地重写同一会话，只有分支操作才创建新会话；本插件则通过创建新会话版本保留原历史。切换前请阅读其数据存储与配置说明，并备份现有会话。
+
+本 fork 以 [GitHub 的 `alpha` 分支](https://github.com/bychv/dsh-message-edit/tree/alpha)作为安装来源。下文版本号与兼容性说明仅针对本 fork；npm 同名包的版本、下载量和发布状态不代表本 fork，也不能据此判断是否包含这里的修复。
+
+`dsh-message-edit` 为 DeepSeek Harness 补充基于事件溯源的「消息编辑与重生成」能力。插件不改写历史事件，也不修改 DSH 引擎内部；每次编辑、重生成或重试都会从目标回合之前创建一个新会话版本，原会话始终保留并可随时切回。
 
 ```bash
-dsh plugin --profile web add github:bychv/dsh-message-edit#main
+dsh plugin --profile web add github:bychv/dsh-message-edit#alpha
 ```
 
-当前预发布版本为 `0.2.4-alpha.3`，面向 DeepSeek Harness `0.1.2-alpha.5`。
+本 fork 当前预发布版本为 `0.2.4-alpha.3`，面向 DeepSeek Harness `0.1.2-alpha.5`。
 
 Host 通过 DSH 注入的服务运行，`SessionLogOffset` 仅作为编译期类型使用，不在运行时从
 profile 的 `@deepseek-ai/dsh-session` 导入。这避免了 CLI 已升级、profile 尚保留旧 peer
@@ -103,6 +109,8 @@ interface MessageEditVersionEvent {
 
 ## 构建
 
+以下命令在本仓库目录中执行，使用 npm 安装构建依赖和运行脚本，不是从 npm 安装本 fork。
+
 ```bash
 npm install
 npm run build
@@ -119,11 +127,13 @@ npm run build
 
 ## 安装
 
+安装此个人 fork 请使用完整的 GitHub 来源及 `#alpha` 分支，不要以 npm 同名包替代：
+
 ```bash
-dsh plugin --profile web add github:bychv/dsh-message-edit#main
+dsh plugin --profile web add github:bychv/dsh-message-edit#alpha
 ```
 
-该命令直接安装此 fork 的当前 alpha 兼容版本。安装完成后重启 dsh；如曾安装 npm 稳定版，`add` 会将 web profile 中的依赖来源更新为该 GitHub 仓库。
+该命令直接安装此 fork 的 `alpha` 分支版本。安装完成后重启 dsh；如曾从 npm 安装同名包，`add` 会将 web profile 中的依赖来源更新为上述 GitHub 分支。包名仍保留为 `dsh-message-edit`，因此它会替换该 profile 中的同名依赖，而不是与原包并存。
 
 或本地开发：
 
