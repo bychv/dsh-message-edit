@@ -13,6 +13,9 @@ export default () => [
     fixedExtension: false,
     dts: false,
     clean: false,
+    // The host half runs inside the dsh process; every @deepseek-ai runtime
+    // identity (cordis, dsh-session, …) must resolve to the host's copy.
+    deps: { neverBundle: /^@deepseek-ai\// },
   },
   clientConfig,
 ]

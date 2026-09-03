@@ -1,16 +1,29 @@
-# DSH Message Edit
+# DSH Message Edit（个人自用 fork）
 
-[![npm version](https://img.shields.io/npm/v/dsh-message-edit)](https://www.npmjs.com/package/dsh-message-edit)
-[![npm downloads](https://img.shields.io/npm/dm/dsh-message-edit)](https://www.npmjs.com/package/dsh-message-edit)
-[![license](https://img.shields.io/npm/l/dsh-message-edit)](LICENSE)
+> 本仓库是由 bychv 为个人自用维护的 fork，并非上游主仓库，也不是 DeepSeek 官方项目。修改主要服务于维护者自己的使用环境，不代表上游的发布、支持或兼容性承诺。
 
-`dsh-message-edit`（[npm](https://www.npmjs.com/package/dsh-message-edit) · [GitHub](https://github.com/bychv/dsh-message-edit)）为 DeepSeek Harness 补充基于事件溯源的「消息编辑与重生成」能力。插件不改写历史事件，也不修改 DSH 引擎内部；每次编辑、重生成或重试都会从目标回合之前创建一个新会话版本，原会话始终保留并可随时切回。
+本 fork 维护者的相关开发经验相对有限，时间和精力也不一定足以实时跟进 DeepSeek Harness 最新版本的兼容性变化，因此无法保证及时适配或修复问题。
+
+如果你需要消息编辑、重试与会话分支等类似功能，也推荐了解 [morlay/better-session](https://github.com/morlay/better-session)。它可能在维护和版本跟进方面比本仓库更完善，建议根据自身需求一并评估；实际维护状态、支持版本和安装方式请以该项目的最新说明为准，这里不对其更新速度或兼容性作保证。
+
+两者并非完全等价：根据 better-session 的项目说明，它采用 RDB 持久化，编辑和重试会就地重写同一会话，只有分支操作才创建新会话；本插件则通过创建新会话版本保留原历史。切换前请阅读其数据存储与配置说明，并备份现有会话。
+
+本 fork 已将 `alpha` 分支的兼容性修复合并至 `main`，以 [GitHub 的 `main` 分支](https://github.com/bychv/dsh-message-edit/tree/main)作为安装来源。下文版本号与兼容性说明仅针对本 fork；npm 同名包的版本、下载量和发布状态不代表本 fork，也不能据此判断是否包含这里的修复。
+
+`dsh-message-edit` 为 DeepSeek Harness 补充基于事件溯源的「消息编辑与重生成」能力。插件不改写历史事件，也不修改 DSH 引擎内部；每次编辑、重生成或重试都会从目标回合之前创建一个新会话版本，原会话始终保留并可随时切回。
 
 ```bash
 dsh plugin --profile web add github:bychv/dsh-message-edit#main
 ```
 
-当前预发布版本为 `0.2.4-alpha.1`，面向 DeepSeek Harness `0.1.2-alpha.3`。
+本 fork 当前预发布版本为 `0.2.4-alpha.3`，已支持 DeepSeek Harness `0.1.2-rc.1`。插件版本号中的 `alpha` 后缀不表示仅支持 DSH alpha 版本。
+
+兼容性验证：使用官方 `@deepseek-ai/dsh-* @0.1.2-rc.1` 依赖完成 Host / Browser TypeScript 类型检查，5 项回归测试全部通过，覆盖插件加载、编辑分支继承、历史冷读、版本链及 retry 输入保留。本次 rc.1 验证不包含浏览器端到端操作或真实模型调用；此前已在 DSH `0.1.2-alpha.5` 上完成本机浏览器验证。
+
+Host 通过 DSH 注入的服务运行，`SessionLogOffset` 仅作为编译期类型使用，不在运行时从
+profile 的 `@deepseek-ai/dsh-session` 导入。这避免了 CLI 已升级、profile 尚保留旧 peer
+时出现 `does not provide an export named 'SessionLogOffset'` 并阻止 DSH 启动。
+这不表示支持所有旧 DSH API；请以以上版本为运行和测试基准。
 
 ## 功能
 
@@ -82,7 +95,7 @@ interface MessageEditVersionEvent {
 }
 ```
 
-会话头的 `parentSession` 构成版本树，且必须与事件中的 `inverse.sessionId` 一致；`seedLength` 区分当前版本自己的元数据与从祖先继承的同名事件。Timeline 通过 `ctx.sessionQuery.traceSession()` 和 `readSession()` 生成完整值级投影，并由原子逆链导出 `undoStack` 与直接 `redoSessionIds`。旧版平面事件仍可读取，并在投影时规范化为同一效果对。
+会话头的 `parentSession` 构成版本树，且必须与事件中的 `inverse.sessionId` 一致；继承边界（0.1.2-alpha.4 的 `isSeeded`/`inheritedEventCount`，落盘仍写作 `seedLength`）区分当前版本自己的元数据与从祖先继承的同名事件。Timeline 通过 `ctx.sessionQuery.traceSession()` 和 `readSession()` 生成完整值级投影，并由原子逆链导出 `undoStack` 与直接 `redoSessionIds`。旧版平面事件仍可读取，并在投影时规范化为同一效果对。
 
 ## UI
 
@@ -98,24 +111,31 @@ interface MessageEditVersionEvent {
 
 ## 构建
 
+以下命令在本仓库目录中执行，使用 npm 安装构建依赖和运行脚本，不是从 npm 安装本 fork。
+
 ```bash
 npm install
 npm run build
 ```
 
-构建基于 npm 发布的 `@deepseek-ai/*@0.1.2-alpha.3` 类型与本地工具链（typescript、tsdown、lightningcss），不再依赖 dsh 源码树。构建生成：
+构建基于 npm 发布的 `@deepseek-ai/*@0.1.2-alpha.5` 类型与本地工具链（typescript、tsdown、lightningcss），不再依赖 dsh 源码树。构建生成：
 
 - `index.mjs`：Host 插件
 - `client.js`：Browser 插件
 - `client.js.map`：Browser source map
 
+运行 `npm test` 会先重新构建，再检查旧 profile peer 下的 Host 加载、真实 Session seed
+验证、分支继承边界、`ignorable` 标记、历史冷读及 retry 输入保留；测试不调用模型、不写用户历史。
+
 ## 安装
+
+安装此个人 fork 请使用完整的 GitHub 来源及 `#main` 分支，不要以 npm 同名包替代：
 
 ```bash
 dsh plugin --profile web add github:bychv/dsh-message-edit#main
 ```
 
-该命令直接安装此 fork 的当前 alpha 兼容版本。安装完成后重启 dsh；如曾安装 npm 稳定版，`add` 会将 web profile 中的依赖来源更新为该 GitHub 仓库。
+该命令直接安装此 fork 的 `main` 分支版本（已支持 DSH `0.1.2-rc.1`）。安装完成后重启 dsh；如曾从 npm 或本仓库的 `alpha` 分支安装同名包，`add` 会将 web profile 中的依赖来源更新为上述 GitHub 分支。包名仍保留为 `dsh-message-edit`，因此它会替换该 profile 中的同名依赖，而不是与原包并存。
 
 或本地开发：
 

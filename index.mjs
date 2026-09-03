@@ -262,9 +262,10 @@ async function withSourceAgent(ctx, sessionId, operation) {
 }
 function inheritedSeed(source, boundary) {
 	if (boundary === -1) return [];
-	const boundaryEvent = source.events[boundary];
+	const events = source.snapshotEvents();
+	const boundaryEvent = events[boundary];
 	if (boundary < 0 || boundaryEvent === void 0 || boundaryEvent.seq !== boundary) throw new Error("分支边界不是连续会话事件。");
-	return source.events.slice(0, boundary + 1);
+	return events.slice(0, boundary + 1);
 }
 /** Build seed envelopes locally; Session construction performs canonical validation and freezing. */
 function appendLogSeedEvent(events, type, data) {
@@ -322,8 +323,9 @@ function versionSeed(source, plan) {
 	};
 }
 function sessionPreset(session) {
-	for (let index = session.events.length - 1; index >= 0; index -= 1) {
-		const event = session.events[index];
+	const events = session.snapshotEvents();
+	for (let index = events.length - 1; index >= 0; index -= 1) {
+		const event = events[index];
 		if (event?.type === "agent-preset/selected") return event.data.agentPreset;
 	}
 	return session.header.agentPreset;
@@ -341,15 +343,17 @@ async function createVersionAgent(ctx, source, childId, plan, options) {
 			await presets.mount(agentCtx, resolved);
 		};
 	}
+	const seeded = seed.inheritedLength > 0;
 	const child = await ctx.agents.create({
 		sessionId: childId,
 		seed: seed.events,
 		meta: {
 			...source.header.cwd === void 0 ? {} : { cwd: source.header.cwd },
 			parentSession: source.id,
-			seedLength: seed.inheritedLength,
+			...seeded ? { isSeeded: true } : {},
 			...agentPreset === void 0 ? {} : { agentPreset }
 		},
+		...seeded ? { inheritedEventCount: seed.inheritedLength } : {},
 		agentOptions: options,
 		...setup === void 0 ? {} : { setup }
 	});
@@ -379,7 +383,7 @@ async function runOperation(ctx, operation) {
 		const childId = sessionIdOf(`session-${crypto.randomUUID()}`);
 		const inverses = [];
 		try {
-			const events = source.session.events;
+			const events = source.session.snapshotEvents();
 			const plan = planOperation(operation, events);
 			const options = agentOptions(events, source.options);
 			const child = await createVersionAgent(ctx, source.session, childId, plan, options);
@@ -405,18 +409,17 @@ async function runOperation(ctx, operation) {
 		}
 	});
 }
-function ownVersionEvent(header, events) {
-	const inherited = header.seedLength ?? 0;
-	const ownEvents = events.filter((event) => event.type === "message-edit/version" && event.seq >= inherited);
+function ownVersionEvent(record, log) {
+	const ownEvents = log.events.filter((event) => event.type === "message-edit/version" && event.seq >= log.inherited);
 	if (ownEvents.length === 0) return void 0;
-	if (ownEvents.length > 1) throw new Error(`会话 ${header.id} 包含多个自身版本效果。`);
+	if (ownEvents.length > 1) throw new Error(`会话 ${record.header.id} 包含多个自身版本效果。`);
 	const event = ownEvents[0];
 	if (event === void 0) return void 0;
-	const parent = header.parentSession;
+	const parent = record.header.parentSession;
 	if ("schemaVersion" in event.data) {
 		const version = event.data;
-		if (version.schemaVersion !== 2) throw new Error(`会话 ${header.id} 使用不支持的版本效果结构。`);
-		if (version.inverse.kind !== "restore-version" || parent === void 0 || version.inverse.sessionId !== parent) throw new Error(`会话 ${header.id} 的版本效果与逆不匹配。`);
+		if (version.schemaVersion !== 2) throw new Error(`会话 ${record.header.id} 使用不支持的版本效果结构。`);
+		if (version.inverse.kind !== "restore-version" || parent === void 0 || version.inverse.sessionId !== parent) throw new Error(`会话 ${record.header.id} 的版本效果与逆不匹配。`);
 		return {
 			effect: version.effect,
 			inverseSessionId: version.inverse.sessionId,
@@ -424,10 +427,10 @@ function ownVersionEvent(header, events) {
 		};
 	}
 	const legacy = event.data;
-	if (parent === void 0 || legacy.sourceSessionId !== parent) throw new Error(`会话 ${header.id} 的旧版恢复目标与父版本不匹配。`);
+	if (parent === void 0 || legacy.sourceSessionId !== parent) throw new Error(`会话 ${record.header.id} 的旧版恢复目标与父版本不匹配。`);
 	return {
 		effect: {
-			id: `legacy:${header.id}:${String(event.seq)}`,
+			id: `legacy:${record.header.id}:${String(event.seq)}`,
 			operation: legacy.operation,
 			cascade: legacy.cascade,
 			targetTurn: legacy.targetTurn,
@@ -476,23 +479,49 @@ async function mapConcurrent(items, worker) {
 	await Promise.all(Array.from({ length: workers }, () => run()));
 	return results;
 }
-/** Full log for the requested session: live borrow, persisted inspection, query fallback. */
+/** Full log for the requested session plus its inheritance cut: live borrow,
+* persisted inspection, query fallback. */
 async function readCurrentLog(ctx, sessionId) {
 	const live = ctx.sessions.get(sessionId);
-	if (live !== void 0) return live.events;
+	if (live !== void 0) return {
+		events: live.snapshotEvents(),
+		inherited: live.inheritedEventCount
+	};
 	const persistence = ctx.get("sessionPersistence");
-	if (persistence !== void 0) return (await persistence.inspect(sessionId)).events;
-	return (await ctx.sessionQuery.readSession(sessionId)).events;
+	if (persistence !== void 0) {
+		const inspection = await persistence.inspect(sessionId);
+		return {
+			events: inspection.events,
+			inherited: inspection.inheritedEventCount ?? 0
+		};
+	}
+	const snapshot = await ctx.sessionQuery.readSession(sessionId);
+	return {
+		events: snapshot.events,
+		inherited: snapshot.inheritedEventCount ?? 0
+	};
 }
 /** Own-version scan window for one lineage node: the tail from the durable
-* seed boundary is enough, and root nodes cannot carry a version effect. */
+* inheritance cut is enough, and root nodes cannot carry a version effect. */
 async function versionLog(ctx, record) {
-	const inherited = record.header.seedLength ?? 0;
 	const live = ctx.sessions.get(record.header.id);
-	if (live !== void 0) return live.events.slice(inherited);
+	if (live !== void 0) return {
+		events: live.snapshotEvents(live.inheritedEventCount),
+		inherited: live.inheritedEventCount
+	};
 	const persistence = ctx.get("sessionPersistence");
-	if (persistence !== void 0) return (await persistence.readFrom(record.header.id, inherited)).events;
-	return (await ctx.sessionQuery.readSession(record.header.id)).events.slice(inherited);
+	if (persistence !== void 0) {
+		const inspection = await persistence.inspect(record.header.id);
+		return {
+			events: inspection.events,
+			inherited: inspection.inheritedEventCount ?? 0
+		};
+	}
+	const snapshot = await ctx.sessionQuery.readSession(record.header.id);
+	return {
+		events: snapshot.events,
+		inherited: snapshot.inheritedEventCount ?? 0
+	};
 }
 async function timeline(ctx, sessionId) {
 	const targetTrace = await ctx.sessionQuery.traceSession(sessionId);
@@ -501,7 +530,10 @@ async function timeline(ctx, sessionId) {
 	const lineage = flattenLineage(rootTrace.target, rootTrace.descendants);
 	const logs = await mapConcurrent(lineage, async ({ record }) => {
 		if (record.header.id === sessionId) return readCurrentLog(ctx, sessionId);
-		if (record.header.parentSession === void 0) return [];
+		if (record.header.parentSession === void 0) return {
+			events: [],
+			inherited: 0
+		};
 		return versionLog(ctx, record);
 	});
 	const recordsById = new Map(lineage.map(({ record }) => [record.header.id, record]));
@@ -512,7 +544,10 @@ async function timeline(ctx, sessionId) {
 		pathId = recordsById.get(pathId)?.header.parentSession;
 	}
 	const versions = lineage.map(({ record, depth }, index) => {
-		const version = ownVersionEvent(record.header, logs[index] ?? []);
+		const version = ownVersionEvent(record, logs[index] ?? {
+			events: [],
+			inherited: 0
+		});
 		return {
 			sessionId: record.header.id,
 			...record.header.parentSession === void 0 ? {} : { parentSessionId: record.header.parentSession },
@@ -554,7 +589,7 @@ async function timeline(ctx, sessionId) {
 	const currentIndex = versions.findIndex((version) => version.current);
 	const currentLog = logs[currentIndex];
 	if (currentIndex < 0 || currentLog === void 0) throw new Error("当前版本不在版本树中。");
-	const turns = closedTurns(currentLog);
+	const turns = closedTurns(currentLog.events);
 	return {
 		sessionId,
 		messages: editableMessages(turns),
