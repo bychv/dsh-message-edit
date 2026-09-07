@@ -18,6 +18,8 @@ dsh plugin --profile web add github:bychv/dsh-message-edit#main
 
 本 fork 当前预发布版本为 `0.2.4-alpha.3`，已支持 DeepSeek Harness `0.1.2-rc.1`。插件版本号中的 `alpha` 后缀不表示仅支持 DSH alpha 版本。
 
+如使用 DSH alpha 版本，请切换到本仓库的 [`alpha` 分支](https://github.com/bychv/dsh-message-edit/tree/alpha)获取对应的兼容性修复。
+
 兼容性验证：使用官方 `@deepseek-ai/dsh-* @0.1.2-rc.1` 依赖完成 Host / Browser TypeScript 类型检查，5 项回归测试全部通过，覆盖插件加载、编辑分支继承、历史冷读、版本链及 retry 输入保留。本次 rc.1 验证不包含浏览器端到端操作或真实模型调用；此前已在 DSH `0.1.2-alpha.5` 上完成本机浏览器验证。
 
 Host 通过 DSH 注入的服务运行，`SessionLogOffset` 仅作为编译期类型使用，不在运行时从
