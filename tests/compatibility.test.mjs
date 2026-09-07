@@ -5,7 +5,8 @@ import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { pathToFileURL } from 'node:url'
 import { test } from 'node:test'
-import { Session } from '@deepseek-ai/dsh-session'
+// An explicit module URL lets the same tests exercise a sandbox's built core.
+const { Session } = await import(process.env.DSH_TEST_SESSION_MODULE ?? '@deepseek-ai/dsh-session')
 import { apply } from '../index.mjs'
 
 test('host bundle loads even when a profile-local session peer lacks SessionLogOffset', async () => {
@@ -34,17 +35,19 @@ function appendTurn(session, turn) {
   }, { surfaceOp: 'append' })
   session.append('step/start', { turn, step: 1 })
   const assistant = session.append('assistant/message', {
-    turn, step: 1, message: {
+    turn, step: 1,
+    ...session.header.version >= 2 ? { stream: [] } : {},
+    message: {
       id: `assistant-${turn}`, role: 'assistant', content: [{ type: 'text', text: `answer ${turn}` }],
       source: { kind: 'model', provider: 'fixture', model: 'fixture' },
     },
-  }, { surfaceOp: 'append', sourceEventSeqs: [] })
+  }, { surfaceOp: 'append', ...session.header.version >= 2 ? {} : { sourceEventSeqs: [] } })
   session.append('step/end', { turn, step: 1 })
   session.append('turn/end', { turn, reason: { kind: 'completed' } })
   return assistant
 }
 
-// Exercise the public HTTP route and the real alpha.5 Session validator/fold.
+// Exercise the public HTTP route and the selected real Session validator/fold.
 // Agent execution and persistence I/O are deterministic adapters: no model calls
 // or user profile/history writes are needed for these regression tests.
 function harness() {
@@ -55,6 +58,8 @@ function harness() {
   const disk = new Map()
   const creates = []
   const queued = []
+  let readHandles = 0
+  let writeHandles = 0
   const persist = (session) => disk.set(session.id, JSON.stringify({
     header: session.header,
     events: session.snapshotEvents(),
@@ -88,9 +93,15 @@ function harness() {
       create: async (options) => {
         creates.push(options)
         const session = Session.create(options.sessionId, options.seed, {
-          version: 0, id: options.sessionId, createdAt: Date.now(),
+          version: source.header.version, id: options.sessionId, createdAt: Date.now(),
           isSeeded: false, ...options.meta,
         }, options.inheritedEventCount)
+        live.set(session.id, session)
+        return { agent: agent(session), dispose: async () => live.delete(session.id) }
+      },
+      resume: async ({ resumeSessionId }) => {
+        const stored = read(resumeSessionId)
+        const session = Session.fromRestore(resumeSessionId, stored.events, stored.header, stored.inheritedEventCount)
         live.set(session.id, session)
         return { agent: agent(session), dispose: async () => live.delete(session.id) }
       },
@@ -111,11 +122,38 @@ function harness() {
         }
       },
     },
-    get: key => key === 'sessionPersistence' ? { inspect: async id => read(id) } : undefined,
+    get: key => key !== 'sessionPersistence' ? undefined : source.header.version < 2
+      ? { inspect: async id => read(id) }
+      : {
+        create: async (header, { inheritedEventCount }) => {
+          writeHandles += 1
+          let events = []
+          let closed = false
+          return {
+            append: async value => { events = structuredClone(value) },
+            flush: async () => {
+              disk.set(header.id, JSON.stringify({ header, events, inheritedEventCount }))
+              creates.push({ seed: events, meta: header, inheritedEventCount })
+            },
+            close: async () => { if (!closed) { closed = true; writeHandles -= 1 } },
+          }
+        },
+        open: async id => {
+          const stored = read(id)
+          readHandles += 1
+          let closed = false
+          return {
+            inheritedEventCount: stored.inheritedEventCount,
+            read: async () => stored.events,
+            close: async () => { if (!closed) { closed = true; readHandles -= 1 } },
+          }
+        },
+      },
   }
   apply(ctx)
   return {
     source, first, second, creates, queued, live, read, persist,
+    assertHandlesClosed: () => { assert.equal(readHandles, 0); assert.equal(writeHandles, 0) },
     async request(method, body) {
       const request = Readable.from(method === 'POST' ? [JSON.stringify(body)] : [])
       request.method = method
@@ -145,9 +183,16 @@ for (const turn of [1, 2]) {
     const prefixLength = turn === 1 ? 0 : h.second.seq - 3
     assert.equal(options.inheritedEventCount ?? 0, prefixLength)
     assert.equal(options.meta.isSeeded ?? false, prefixLength > 0)
-    const version = options.seed[prefixLength]
+    const version = options.seed[prefixLength + (h.source.header.version >= 2 ? 1 : 0)]
     assert.equal(version.type, 'message-edit/version')
     assert.equal(version.ignorable, true)
+    const edited = options.seed.findLast(event => event.type === 'assistant/message')
+    if (h.source.header.version >= 2) {
+      assert.deepEqual(edited.data.stream, [])
+      assert.equal(Object.hasOwn(edited, 'sourceEventSeqs'), false)
+    } else {
+      assert.deepEqual(edited.sourceEventSeqs, [])
+    }
     assert.ok(options.seed.filter(event => event.type !== 'message-edit/version')
       .every(event => !Object.hasOwn(event, 'ignorable')))
     assert.equal(h.source.deriveMessages().at(-1).content[0].text, 'answer 2')
@@ -162,6 +207,7 @@ for (const turn of [1, 2]) {
     assert.equal(timeline.messages.at(-1).text, 'edited answer')
     assert.deepEqual(timeline.undoStack, [h.source.id])
     assert.equal(timeline.versions.length, 2)
+    h.assertHandlesClosed()
   })
 }
 
@@ -181,11 +227,12 @@ test('a second-generation branch distinguishes inherited and owned version event
   })
   const options = h.creates[1]
   assert.equal(options.seed.filter(event => event.type === 'message-edit/version').length, 2)
-  assert.equal(options.seed[options.inheritedEventCount].type, 'message-edit/version')
+  assert.equal(options.seed[options.inheritedEventCount + (h.source.header.version >= 2 ? 1 : 0)].type, 'message-edit/version')
   h.live.clear()
   const timeline = await h.request('GET', { sessionId: second.sessionId })
   assert.deepEqual(timeline.undoStack, [first.sessionId, h.source.id])
   assert.equal(timeline.messages.at(-1).text, 'second edit')
+  h.assertHandlesClosed()
 })
 
 test('retry preserves queued inputs while metadata stays ignorable', async () => {
@@ -195,6 +242,27 @@ test('retry preserves queued inputs while metadata stays ignorable', async () =>
   })
   assert.equal(result.queuedTurns, 2)
   assert.deepEqual(h.queued.map(message => message.content[0].text), ['question 1', 'question 2'])
-  assert.equal(h.creates[0].seed[0].ignorable, true)
-  assert.equal(h.creates[0].inheritedEventCount, undefined)
+  assert.equal(h.creates[0].seed.find(event => event.type === 'message-edit/version').ignorable, true)
+  assert.equal(h.creates[0].inheritedEventCount ?? 0, 0)
+  h.assertHandlesClosed()
+})
+
+test('an edited branch can be resumed and edited again after all live agents are removed', async () => {
+  const h = harness()
+  const first = await h.request('POST', {
+    action: 'edit', sessionId: h.source.id, eventSeq: h.second.seq,
+    blockIndex: 0, text: 'before restart', cascade: 'truncate',
+  })
+  h.live.clear()
+  const history = await h.request('GET', { sessionId: first.sessionId })
+  const target = history.messages.at(-1)
+  const second = await h.request('POST', {
+    action: 'edit', sessionId: first.sessionId, eventSeq: target.eventSeq,
+    blockIndex: target.blockIndex, text: 'after restart', cascade: 'truncate',
+  })
+  h.live.clear()
+  const restored = await h.request('GET', { sessionId: second.sessionId })
+  assert.equal(restored.messages.at(-1).text, 'after restart')
+  assert.deepEqual(restored.undoStack, [first.sessionId, h.source.id])
+  h.assertHandlesClosed()
 })

@@ -393,8 +393,9 @@ function planOperation(operation: MessageEditOperation, events: readonly Session
 
 function agentOptions(events: readonly SessionEvent[], fallback?: AgentOptions): AgentOptions {
   const config = events.findLast(event => event.type === 'request/header')?.data.header.config
-  const provider = config?.provider ?? fallback?.provider
-  const model = config?.model ?? fallback?.model
+  const assistant = events.findLast(event => event.type === 'assistant/message')?.data.message.source
+  const provider = config?.provider ?? fallback?.provider ?? assistant?.provider
+  const model = config?.model ?? fallback?.model ?? assistant?.model
   if (provider === undefined || provider.length === 0 || model === undefined || model.length === 0) {
     throw new Error('无法从会话历史解析模型路由。')
   }
@@ -414,7 +415,7 @@ async function withSourceAgent<T>(
   let handle: AgentHandle | undefined
   let agent = ctx.agents.get(sessionId)
   if (agent === undefined) {
-    const snapshot = await ctx.sessionQuery.readSession(sessionId)
+    const snapshot = await readStoredLog(ctx, sessionId)
     handle = await ctx.agents.resume({
       resumeSessionId: sessionId,
       agentOptions: agentOptions(snapshot.events),
@@ -469,14 +470,20 @@ function appendSurfaceSeedEvent<T extends SurfaceEventType>(
   } as SessionEvent<T>)
 }
 
-function appendManualTurn(events: SessionEvent[], manual: ManualAssistantTurn): void {
+function appendManualTurn(events: SessionEvent[], manual: ManualAssistantTurn, embeddedStream: boolean): void {
   const { turn, user, assistant } = manual
   appendLogSeedEvent(events, 'turn/start', { turn })
   appendSurfaceSeedEvent(events, 'user/message', user, { surfaceOp: 'append' })
   appendLogSeedEvent(events, 'step/start', { turn, step: 1 })
-  appendSurfaceSeedEvent(events, 'assistant/message', { turn, step: 1, message: assistant }, {
+  // Format v2 embeds the stream in each assistant message and rejects external
+  // provenance. A manual edit has no model stream; do not reuse the old one.
+  const data = {
+    turn, step: 1, message: assistant,
+    ...embeddedStream ? { stream: [] } : {},
+  } as AssistantEvent['data'] // The owning Session format selects the schema.
+  appendSurfaceSeedEvent(events, 'assistant/message', data, {
     surfaceOp: 'append',
-    sourceEventSeqs: [],
+    ...embeddedStream ? {} : { sourceEventSeqs: [] },
   })
   appendLogSeedEvent(events, 'step/end', { turn, step: 1 })
   appendLogSeedEvent(events, 'turn/end', { turn, reason: { kind: 'completed' } })
@@ -491,7 +498,7 @@ function versionSeed(source: Session, plan: OperationPlan): {
   // profile-local DSH peers may lag behind the services supplied by the host CLI.
   const inheritedLength = events.length as SessionLogOffset
   appendLogSeedEvent(events, 'message-edit/version', plan.version)
-  if (plan.manualTurn !== undefined) appendManualTurn(events, plan.manualTurn)
+  if (plan.manualTurn !== undefined) appendManualTurn(events, plan.manualTurn, source.header.version >= 2)
   return { events, inheritedLength }
 }
 
@@ -511,7 +518,6 @@ async function createVersionAgent(
   plan: OperationPlan,
   options: AgentOptions,
 ): Promise<AgentHandle> {
-  const seed = versionSeed(source, plan)
   const presets = ctx.get('agentPresets')
   const presetId = sessionPreset(source)
   let agentPreset: string | undefined
@@ -521,6 +527,10 @@ async function createVersionAgent(
     agentPreset = resolved
     setup = async (agentCtx) => { await presets.mount(agentCtx, resolved) }
   }
+  if (source.header.version >= 2) {
+    return createStoredVersionAgent(ctx, source, childId, plan, options, agentPreset, setup)
+  }
+  const seed = versionSeed(source, plan)
   const seeded = seed.inheritedLength > 0
   const child = await ctx.agents.create({
     sessionId: childId,
@@ -541,6 +551,60 @@ async function createVersionAgent(
   } catch (error: unknown) {
     await child.dispose()
     throw error
+  }
+}
+
+/** Format v2 permits only inherited events in a fresh seeded constructor.
+ * Validate the complete branch off-store, then transfer it through the public
+ * persistence/restore boundary. This preserves both the inherited cut and the
+ * ignorable extension envelope, which Session.append cannot currently express.
+ */
+async function createStoredVersionAgent(
+  ctx: Context,
+  source: Session,
+  childId: SessionId,
+  plan: OperationPlan,
+  options: AgentOptions,
+  agentPreset: string | undefined,
+  setup: AgentSetup | undefined,
+): Promise<AgentHandle> {
+  const persistence = ctx.get('sessionPersistence') as PersistenceReaderLike | undefined
+  if (persistence?.create === undefined) throw new Error('当前持久化服务不支持创建版本。')
+  const prefix = inheritedSeed(source, plan.boundary)
+  const inherited = prefix.length as SessionLogOffset
+  // Borrow the host's actual class identity without importing profile-local peers.
+  const SessionClass = source.constructor as typeof Session
+  const detached = SessionClass.create(childId, prefix, {
+    version: source.header.version,
+    id: childId,
+    createdAt: Date.now(),
+    isSeeded: inherited > 0,
+    parentSession: source.id,
+    ...source.header.cwd === undefined ? {} : { cwd: source.header.cwd },
+    ...agentPreset === undefined ? {} : { agentPreset },
+  }, inherited)
+  const events = [...detached.snapshotEvents()]
+  appendLogSeedEvent(events, 'message-edit/version', plan.version)
+  if (plan.manualTurn !== undefined) appendManualTurn(events, plan.manualTurn, true)
+  // Full validation precedes any persistent publication; originals remain untouched.
+  SessionClass.fromRestore(childId, structuredClone(events), detached.header, inherited)
+  const handle = await persistence.create(detached.header, { inheritedEventCount: inherited })
+  try {
+    await handle.append(events)
+    await handle.flush()
+  } finally {
+    await handle.close()
+  }
+  try {
+    return await ctx.agents.resume({
+      resumeSessionId: childId,
+      agentOptions: options,
+      ...setup === undefined ? {} : { setup },
+    })
+  } catch (error: unknown) {
+    // The public append-only backend has no delete transaction. Keep the valid
+    // durable branch recoverable and identify it if activating the agent fails.
+    throw new Error(`版本 ${childId} 已保存，但加载 Agent 失败：${error instanceof Error ? error.message : String(error)}`)
   }
 }
 
@@ -670,8 +734,35 @@ interface InheritedLog {
 /** Minimal read face of the optional persistence service; borrowed events are
  * consumed synchronously inside one timeline projection. */
 interface PersistenceReaderLike {
-  inspect(sessionId: SessionId, signal?: AbortSignal): Promise<{ events: readonly SessionEvent[]; inheritedEventCount?: number }>
-  readFrom(sessionId: SessionId, fromSeq: number, signal?: AbortSignal): Promise<{ events: readonly SessionEvent[]; inheritedEventCount?: number }>
+  inspect?(sessionId: SessionId, signal?: AbortSignal): Promise<{ events: readonly SessionEvent[]; inheritedEventCount?: number }>
+  open?(sessionId: SessionId, access: 'read'): Promise<{
+    inheritedEventCount: number
+    read(): Promise<readonly SessionEvent[]>
+    close(): Promise<void>
+  }>
+  create?(header: Session['header'], options: { inheritedEventCount: SessionLogOffset }): Promise<{
+    append(events: readonly SessionEvent[]): Promise<void>
+    flush(): Promise<void>
+    close(): Promise<void>
+  }>
+}
+
+async function readStoredLog(ctx: Context, sessionId: SessionId): Promise<InheritedLog> {
+  const persistence = ctx.get('sessionPersistence') as PersistenceReaderLike | undefined
+  if (persistence?.open !== undefined) {
+    const handle = await persistence.open(sessionId, 'read')
+    try {
+      return { events: await handle.read(), inherited: handle.inheritedEventCount }
+    } finally {
+      await handle.close()
+    }
+  }
+  if (persistence?.inspect !== undefined) {
+    const inspection = await persistence.inspect(sessionId)
+    return { events: inspection.events, inherited: inspection.inheritedEventCount ?? 0 }
+  }
+  const snapshot = await ctx.sessionQuery.readSession(sessionId)
+  return { events: snapshot.events, inherited: snapshot.inheritedEventCount ?? 0 }
 }
 
 /** Bounded parallel inspection of persisted branches; matches the corpus worker shape. */
@@ -701,13 +792,7 @@ async function mapConcurrent<T, R>(
 async function readCurrentLog(ctx: Context, sessionId: SessionId): Promise<InheritedLog> {
   const live = ctx.sessions.get(sessionId)
   if (live !== undefined) return { events: live.snapshotEvents(), inherited: live.inheritedEventCount }
-  const persistence = ctx.get('sessionPersistence') as PersistenceReaderLike | undefined
-  if (persistence !== undefined) {
-    const inspection = await persistence.inspect(sessionId)
-    return { events: inspection.events, inherited: inspection.inheritedEventCount ?? 0 }
-  }
-  const snapshot = await ctx.sessionQuery.readSession(sessionId)
-  return { events: snapshot.events, inherited: snapshot.inheritedEventCount ?? 0 }
+  return readStoredLog(ctx, sessionId)
 }
 
 /** Own-version scan window for one lineage node: the tail from the durable
@@ -717,13 +802,7 @@ async function versionLog(ctx: Context, record: SessionRecord): Promise<Inherite
   if (live !== undefined) {
     return { events: live.snapshotEvents(live.inheritedEventCount), inherited: live.inheritedEventCount }
   }
-  const persistence = ctx.get('sessionPersistence') as PersistenceReaderLike | undefined
-  if (persistence !== undefined) {
-    const inspection = await persistence.inspect(record.header.id)
-    return { events: inspection.events, inherited: inspection.inheritedEventCount ?? 0 }
-  }
-  const snapshot = await ctx.sessionQuery.readSession(record.header.id)
-  return { events: snapshot.events, inherited: snapshot.inheritedEventCount ?? 0 }
+  return readStoredLog(ctx, record.header.id)
 }
 
 async function timeline(ctx: Context, sessionId: SessionId): Promise<MessageEditTimeline> {

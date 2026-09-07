@@ -16,7 +16,9 @@
 dsh plugin --profile web add github:bychv/dsh-message-edit#alpha
 ```
 
-本 fork 当前预发布版本为 `0.2.4-alpha.3`，面向 DeepSeek Harness `0.1.2-alpha.5`。
+本 fork 当前预发布版本为 `0.2.5-alpha.1`，适配 DeepSeek Harness `0.1.3-alpha.1`（本次沙盒源码提交 `d347e703908d0406b7a7ef80e3a0e594d86b2215`），同时保留旧版会话格式的创建路径。
+
+本次修复包括：助手消息的 format v2 嵌入式 `stream`、严格的继承前缀边界，以及新版持久化 `open/read/close` 接口。手工编辑消息使用空流，不沿用与编辑后内容不一致的模型流；`message-edit/*` 事件仍带有 `ignorable: true`。
 
 Host 通过 DSH 注入的服务运行，`SessionLogOffset` 仅作为编译期类型使用，不在运行时从
 profile 的 `@deepseek-ai/dsh-session` 导入。这避免了 CLI 已升级、profile 尚保留旧 peer
@@ -47,12 +49,14 @@ profile 的 `@deepseek-ai/dsh-session` 导入。这避免了 CLI 已升级、pro
 
 ### 分支与 Agent 接线
 
-旧实现先用短生命周期 Session 暂存分支、落盘、移除 live Session，再用 `agents.resume()` 重建 Agent。这个过程存在两个分离的生命周期边界：暂存日志已经持久化后，Agent 仍可能创建失败。现实现只使用 `AgentRegistry.create()` 已公开的 `seed + meta` 事务缝：
+根据来源 Session 的格式选择公开 API：
 
-1. 在来源 Agent 的 runMaintenance() 内，从已闭合边界取得不可变 seed；第一回合之前使用空 seed。
-2. 用本地等价的纯事件构造器把版本效果对与可选手工助手回合加入 seed，再调用 `ctx.agents.create({ seed, meta })`。Session 在 Agent 构造前一次性验证完整 seed；任何一步失败都会由 AgentFactory 的结构性逆撤销，外部观察者看不到半成品 Session，Agent 的回合计数也直接从完整历史初始化。
-3. 发布后调用 `ctx.sessions.flush()`，在 HTTP 操作成功前建立耐久性屏障。
-4. Workspace 挂接与 child Agent 生命周期分别返回原子逆；操作失败时按相反顺序组合恢复。随后通过 `child.agent.followup()` 排入需要重新执行的用户输入。
+1. 在来源 Agent 的 `runMaintenance()` 内，从已闭合边界取得不可变前缀；第一回合之前使用空前缀。
+2. 旧格式仍通过 `ctx.agents.create({ seed, meta })` 创建完整版本，再调用 `ctx.sessions.flush()`。
+3. Format v2 的新建 seed 必须完全等于继承前缀。因此先由宿主的 Session 类构造离线前缀和原生继承标记，再添加可忽略的版本事件及手工回合，并通过 `Session.fromRestore()` 完整验证。验证通过后使用持久化 handle 的 `create/append/flush/close` 保存，再由 `ctx.agents.resume()` 加载完整历史。
+4. Workspace 挂接与 child Agent 生命周期分别返回原子逆；随后通过 `child.agent.followup()` 排入需要重新执行的用户输入。
+
+Format v2 路径的持久化与 Agent 加载是两个阶段：若版本已保存但 Agent 加载失败，错误会包含已保存的会话 ID，便于恢复。当前公开的 append-only 持久化 API 没有删除事务，不能承诺回滚已经保存的版本；原会话始终不改写。
 
 此路径不接触 `ReactLoopAgent`、AgentLoop 私有方法或 apiproxy 的收窄 fork RPC；分支 seed 仍由同一 Session 公共事件契约验证。
 
@@ -124,6 +128,8 @@ npm run build
 
 运行 `npm test` 会先重新构建，再检查旧 profile peer 下的 Host 加载、真实 Session seed
 验证、分支继承边界、`ignorable` 标记、历史冷读及 retry 输入保留；测试不调用模型、不写用户历史。
+
+测试也支持通过 `DSH_TEST_SESSION_MODULE` 指定沙盒中已构建的 `dsh-session` 模块绝对 file URL，再运行 `node --test tests/compatibility.test.mjs`。这样同一套测试可使用目标版本的真实 Session 校验器；Agent 和持久化适配器仍是测试替身，不能代替沙盒进程测试。
 
 ## 安装
 
