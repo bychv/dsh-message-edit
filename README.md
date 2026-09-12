@@ -16,11 +16,11 @@
 dsh plugin --profile web add github:bychv/dsh-message-edit#main
 ```
 
-本 fork 当前预发布版本为 `0.2.4-alpha.3`，已支持 DeepSeek Harness `0.1.2-rc.1`。插件版本号中的 `alpha` 后缀不表示仅支持 DSH alpha 版本。
+本 fork 当前预发布版本为 `0.2.5-alpha.1`，已支持 DeepSeek Harness `0.1.2-rc.1`，并提供升级到新版 DSH 前使用的历史记录迁移工具。插件版本号中的 `alpha` 后缀不表示仅支持 DSH alpha 版本。
 
 如使用 DSH alpha 版本，请切换到本仓库的 [`alpha` 分支](https://github.com/bychv/dsh-message-edit/tree/alpha)获取对应的兼容性修复。
 
-兼容性验证：使用官方 `@deepseek-ai/dsh-* @0.1.2-rc.1` 依赖完成 Host / Browser TypeScript 类型检查，5 项回归测试全部通过，覆盖插件加载、编辑分支继承、历史冷读、版本链及 retry 输入保留。本次 rc.1 验证不包含浏览器端到端操作或真实模型调用；此前已在 DSH `0.1.2-alpha.5` 上完成本机浏览器验证。
+兼容性验证：使用官方 `@deepseek-ai/dsh-* @0.1.2-rc.1` 依赖完成 Host / Browser TypeScript 类型检查，6 项回归测试全部通过，覆盖插件加载、编辑分支继承、历史冷读、版本链、retry 输入保留及升级前历史迁移。本次 rc.1 验证不包含真实模型调用；此前已在 DSH `0.1.2-alpha.5` 上完成本机浏览器验证。
 
 Host 通过 DSH 注入的服务运行，`SessionLogOffset` 仅作为编译期类型使用，不在运行时从
 profile 的 `@deepseek-ai/dsh-session` 导入。这避免了 CLI 已升级、profile 尚保留旧 peer
@@ -127,7 +127,28 @@ npm run build
 - `client.js.map`：Browser source map
 
 运行 `npm test` 会先重新构建，再检查旧 profile peer 下的 Host 加载、真实 Session seed
-验证、分支继承边界、`ignorable` 标记、历史冷读及 retry 输入保留；测试不调用模型、不写用户历史。
+验证、分支继承边界、`ignorable` 标记、历史冷读、retry 输入保留及 v3 迁移；测试不调用模型、不写用户历史。
+
+## 升级 DSH 前迁移历史记录
+
+如果当前仍在使用 DSH `0.1.2`（已用 `0.1.2-rc.1` 验证），并准备升级到本仓库 `alpha` 分支对应的新版 DSH，请在升级 DSH **之前**运行迁移工具。旧版产生的是一套过渡期 Session 格式；直接升级后，新版 DSH 可能拒绝加载这些记录。迁移工具会使用官方格式迁移器生成新版可读的 `session.v3.jsonl` 或 `session.v3.jsonl.zstd`，并为所有 `message-edit/*` 事件补上 `ignorable: true`。
+
+先停止 DSH，在本仓库 `main` 分支目录安装依赖并执行只读检查：
+
+```bash
+npm install
+npm run migrate:history -- --dsh-home "你的 DSH_HOME 绝对路径"
+```
+
+确认报告中的 `warnings` 为空，再实际迁移：
+
+```bash
+npm run migrate:history -- --dsh-home "你的 DSH_HOME 绝对路径" --apply
+```
+
+迁移过程不会删除或改写旧的 `session.jsonl*`：旧 DSH 仍读取原文件，新 DSH 会优先读取同目录的新 v3 文件。同时，工具会在 `DSH_HOME/backups/dsh-message-edit-v3-时间戳/` 下保存逐文件备份和 `manifest.json`。因此应在 DSH `0.1.2` 停止运行后执行迁移，迁移完成后不要再用旧版继续产生会话，再升级 DSH 并切换插件的 `alpha` 分支。
+
+如果 dry-run 或 apply 报错，或者 `warnings` 非空，请先保留原环境和备份，不要继续升级。工具默认不猜测 `DSH_HOME`，以避免迁移到错误的 profile；`--help` 可查看参数。
 
 ## 安装
 
