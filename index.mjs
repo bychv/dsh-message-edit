@@ -368,7 +368,7 @@ async function createVersionAgent(ctx, source, childId, plan, options) {
 		throw error;
 	}
 }
-/** Format v2 permits only inherited events in a fresh seeded constructor.
+/** Format v2+ permits only inherited events in a fresh seeded constructor.
 * Validate the complete branch off-store, then transfer it through the public
 * persistence/restore boundary. This preserves both the inherited cut and the
 * ignorable extension envelope, which Session.append cannot currently express.
@@ -391,7 +391,7 @@ async function createStoredVersionAgent(ctx, source, childId, plan, options, age
 	const events = [...detached.snapshotEvents()];
 	appendLogSeedEvent(events, "message-edit/version", plan.version);
 	if (plan.manualTurn !== void 0) appendManualTurn(events, plan.manualTurn, true);
-	SessionClass.fromRestore(childId, structuredClone(events), detached.header, inherited);
+	restoreDetachedSession(SessionClass, childId, structuredClone(events), detached.header, inherited);
 	const handle = await persistence.create(detached.header, { inheritedEventCount: inherited });
 	try {
 		await handle.append(events);
@@ -506,13 +506,26 @@ function flattenLineage(root, descendants) {
 	visit(descendants, 1);
 	return result;
 }
+/** DSH v3 requires an explicit seed ownership state; older runtimes ignore the
+* extra JavaScript argument. Keep this boundary structural so one bundle can
+* still load against the supported v2-era profile peers. */
+function restoreDetachedSession(SessionClass, id, events, header, inheritedEventCount) {
+	const restore = SessionClass.fromRestore;
+	return restore(id, events, header, inheritedEventCount, "detached");
+}
+function persistenceEvents(result) {
+	if (Array.isArray(result)) return result;
+	const wrapped = result;
+	if (typeof wrapped === "object" && wrapped !== null && Array.isArray(wrapped.events)) return wrapped.events;
+	throw new Error("持久化服务返回了不支持的会话读取结果。");
+}
 async function readStoredLog(ctx, sessionId) {
 	const persistence = ctx.get("sessionPersistence");
 	if (persistence?.open !== void 0) {
 		const handle = await persistence.open(sessionId, "read");
 		try {
 			return {
-				events: await handle.read(),
+				events: persistenceEvents(await handle.read()),
 				inherited: handle.inheritedEventCount
 			};
 		} finally {

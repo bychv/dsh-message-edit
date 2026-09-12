@@ -16,9 +16,11 @@
 dsh plugin --profile web add github:bychv/dsh-message-edit#alpha
 ```
 
-本 fork 当前预发布版本为 `0.2.5-alpha.1`，适配 DeepSeek Harness `0.1.3-alpha.1`（本次沙盒源码提交 `d347e703908d0406b7a7ef80e3a0e594d86b2215`），同时保留旧版会话格式的创建路径。
+本 fork 当前预发布版本为 `0.2.6-alpha.1`，适配并以 DeepSeek Harness `0.1.5-rc.2` 为沙盒测试基线，同时保留旧版会话格式的运行时兼容路径。
 
-本次修复包括：助手消息的 format v2 嵌入式 `stream`、严格的继承前缀边界，以及新版持久化 `open/read/close` 接口。手工编辑消息使用空流，不沿用与编辑后内容不一致的模型流；`message-edit/*` 事件仍带有 `ignorable: true`。
+本次修复包括：适配 format v3 持久化 `read()` 返回的 `{ events, eventState }`，在恢复 Session 时传递 v3 要求的事件所有权状态，并继续兼容旧版直接返回事件数组的读取接口。助手消息仍使用格式要求的嵌入式空 `stream`，不沿用与编辑后内容不一致的模型流；`message-edit/*` 事件继续带有 `ignorable: true`。
+
+> **旧数据升级限制：** “兼容旧版运行时”不等于已有 format v2 插件分支可直接迁移到 format v3。DSH `0.1.5-rc.2` 的内置 v2→v3 迁移器会在插件加载前拒绝未被核心分类的 `message-edit/version` 事件，即使该事件带有 `ignorable: true`；插件无法在正常启动流程中拦截这一阶段。升级含有本插件旧分支的 profile 前请备份数据并保留旧 DSH 环境。本版已验证的是 format v3 下新建版本、二级分支、落盘历史冷重启与冷恢复后再次编辑。
 
 Host 通过 DSH 注入的服务运行，`SessionLogOffset` 仅作为编译期类型使用，不在运行时从
 profile 的 `@deepseek-ai/dsh-session` 导入。这避免了 CLI 已升级、profile 尚保留旧 peer
@@ -53,10 +55,10 @@ profile 的 `@deepseek-ai/dsh-session` 导入。这避免了 CLI 已升级、pro
 
 1. 在来源 Agent 的 `runMaintenance()` 内，从已闭合边界取得不可变前缀；第一回合之前使用空前缀。
 2. 旧格式仍通过 `ctx.agents.create({ seed, meta })` 创建完整版本，再调用 `ctx.sessions.flush()`。
-3. Format v2 的新建 seed 必须完全等于继承前缀。因此先由宿主的 Session 类构造离线前缀和原生继承标记，再添加可忽略的版本事件及手工回合，并通过 `Session.fromRestore()` 完整验证。验证通过后使用持久化 handle 的 `create/append/flush/close` 保存，再由 `ctx.agents.resume()` 加载完整历史。
+3. Format v2+ 的新建 seed 必须完全等于继承前缀。因此先由宿主的 Session 类构造离线前缀和原生继承标记，再添加可忽略的版本事件及手工回合，并通过 `Session.fromRestore()` 完整验证。Format v3 恢复时显式传递 `detached` 事件所有权状态。验证通过后使用持久化 handle 的 `create/append/flush/close` 保存，再由 `ctx.agents.resume()` 加载完整历史。
 4. Workspace 挂接与 child Agent 生命周期分别返回原子逆；随后通过 `child.agent.followup()` 排入需要重新执行的用户输入。
 
-Format v2 路径的持久化与 Agent 加载是两个阶段：若版本已保存但 Agent 加载失败，错误会包含已保存的会话 ID，便于恢复。当前公开的 append-only 持久化 API 没有删除事务，不能承诺回滚已经保存的版本；原会话始终不改写。
+Format v2+ 路径的持久化与 Agent 加载是两个阶段：若版本已保存但 Agent 加载失败，错误会包含已保存的会话 ID，便于恢复。当前公开的 append-only 持久化 API 没有删除事务，不能承诺回滚已经保存的版本；原会话始终不改写。
 
 此路径不接触 `ReactLoopAgent`、AgentLoop 私有方法或 apiproxy 的收窄 fork RPC；分支 seed 仍由同一 Session 公共事件契约验证。
 
@@ -120,7 +122,7 @@ npm install
 npm run build
 ```
 
-构建基于 npm 发布的 `@deepseek-ai/*@0.1.2-alpha.5` 类型与本地工具链（typescript、tsdown、lightningcss），不再依赖 dsh 源码树。构建生成：
+构建基于 npm 发布的 `@deepseek-ai/*@0.1.5-rc.2` 类型与本地工具链（typescript、tsdown、lightningcss），不再依赖 dsh 源码树。构建生成：
 
 - `index.mjs`：Host 插件
 - `client.js`：Browser 插件

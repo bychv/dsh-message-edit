@@ -9,6 +9,11 @@ import { test } from 'node:test'
 const { Session } = await import(process.env.DSH_TEST_SESSION_MODULE ?? '@deepseek-ai/dsh-session')
 import { apply } from '../index.mjs'
 
+function restoreSession(id, events, header, inheritedEventCount) {
+  // DSH format v3 requires the ownership state; v2 ignores the extra argument.
+  return Session.fromRestore(id, events, header, inheritedEventCount, 'detached')
+}
+
 test('host bundle loads even when a profile-local session peer lacks SessionLogOffset', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-message-edit-compat-'))
   try {
@@ -101,7 +106,7 @@ function harness() {
       },
       resume: async ({ resumeSessionId }) => {
         const stored = read(resumeSessionId)
-        const session = Session.fromRestore(resumeSessionId, stored.events, stored.header, stored.inheritedEventCount)
+        const session = restoreSession(resumeSessionId, stored.events, stored.header, stored.inheritedEventCount)
         live.set(session.id, session)
         return { agent: agent(session), dispose: async () => live.delete(session.id) }
       },
@@ -144,7 +149,9 @@ function harness() {
           let closed = false
           return {
             inheritedEventCount: stored.inheritedEventCount,
-            read: async () => stored.events,
+            read: async () => source.header.version >= 3
+              ? { events: stored.events, eventState: 'detached' }
+              : stored.events,
             close: async () => { if (!closed) { closed = true; readHandles -= 1 } },
           }
         },
@@ -198,7 +205,7 @@ for (const turn of [1, 2]) {
     assert.equal(h.source.deriveMessages().at(-1).content[0].text, 'answer 2')
 
     const stored = h.read(result.sessionId)
-    const restored = Session.fromRestore(result.sessionId, stored.events, stored.header, stored.inheritedEventCount)
+    const restored = restoreSession(result.sessionId, stored.events, stored.header, stored.inheritedEventCount)
     assert.equal(restored.deriveMessages().at(-1).content[0].text, 'edited answer')
     assert.equal(restored.inheritedEventCount, prefixLength)
     assert.equal(restored.ownEvents().filter(event => event.type === 'message-edit/version').length, 1)

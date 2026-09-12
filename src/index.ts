@@ -451,7 +451,7 @@ function appendLogSeedEvent<T extends Exclude<SessionEventType, SurfaceEventType
     time: Date.now(),
     data,
     ...(type.startsWith('message-edit/') ? { ignorable: true as const } : {}),
-  } as SessionEvent<T>)
+  } as unknown as SessionEvent<T>)
 }
 
 function appendSurfaceSeedEvent<T extends SurfaceEventType>(
@@ -467,7 +467,7 @@ function appendSurfaceSeedEvent<T extends SurfaceEventType>(
     data,
     surfaceOp: intent.surfaceOp,
     ...intent.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: intent.sourceEventSeqs },
-  } as SessionEvent<T>)
+  } as unknown as SessionEvent<T>)
 }
 
 function appendManualTurn(events: SessionEvent[], manual: ManualAssistantTurn, embeddedStream: boolean): void {
@@ -554,7 +554,7 @@ async function createVersionAgent(
   }
 }
 
-/** Format v2 permits only inherited events in a fresh seeded constructor.
+/** Format v2+ permits only inherited events in a fresh seeded constructor.
  * Validate the complete branch off-store, then transfer it through the public
  * persistence/restore boundary. This preserves both the inherited cut and the
  * ignorable extension envelope, which Session.append cannot currently express.
@@ -587,7 +587,7 @@ async function createStoredVersionAgent(
   appendLogSeedEvent(events, 'message-edit/version', plan.version)
   if (plan.manualTurn !== undefined) appendManualTurn(events, plan.manualTurn, true)
   // Full validation precedes any persistent publication; originals remain untouched.
-  SessionClass.fromRestore(childId, structuredClone(events), detached.header, inherited)
+  restoreDetachedSession(SessionClass, childId, structuredClone(events), detached.header, inherited)
   const handle = await persistence.create(detached.header, { inheritedEventCount: inherited })
   try {
     await handle.append(events)
@@ -731,13 +731,53 @@ interface InheritedLog {
   inherited: number
 }
 
+type SessionSeedEventStateCompat = 'detached' | 'shared-frozen'
+
+type PersistenceReadResultCompat = readonly SessionEvent[] | {
+  readonly events: readonly SessionEvent[]
+  readonly eventState: SessionSeedEventStateCompat
+}
+
+interface SessionRestoreCompat {
+  (
+    id: SessionId,
+    seed: readonly SessionEvent[],
+    header: Session['header'],
+    inheritedEventCount: SessionLogOffset,
+    eventState?: SessionSeedEventStateCompat,
+  ): Session
+}
+
+/** DSH v3 requires an explicit seed ownership state; older runtimes ignore the
+ * extra JavaScript argument. Keep this boundary structural so one bundle can
+ * still load against the supported v2-era profile peers. */
+function restoreDetachedSession(
+  SessionClass: typeof Session,
+  id: SessionId,
+  events: readonly SessionEvent[],
+  header: Session['header'],
+  inheritedEventCount: SessionLogOffset,
+): Session {
+  const restore = SessionClass.fromRestore as unknown as SessionRestoreCompat
+  return restore(id, events, header, inheritedEventCount, 'detached')
+}
+
+function persistenceEvents(result: PersistenceReadResultCompat): readonly SessionEvent[] {
+  if (Array.isArray(result)) return result
+  const wrapped = result as Exclude<PersistenceReadResultCompat, readonly SessionEvent[]>
+  if (typeof wrapped === 'object' && wrapped !== null && Array.isArray(wrapped.events)) {
+    return wrapped.events
+  }
+  throw new Error('持久化服务返回了不支持的会话读取结果。')
+}
+
 /** Minimal read face of the optional persistence service; borrowed events are
  * consumed synchronously inside one timeline projection. */
 interface PersistenceReaderLike {
   inspect?(sessionId: SessionId, signal?: AbortSignal): Promise<{ events: readonly SessionEvent[]; inheritedEventCount?: number }>
   open?(sessionId: SessionId, access: 'read'): Promise<{
     inheritedEventCount: number
-    read(): Promise<readonly SessionEvent[]>
+    read(): Promise<PersistenceReadResultCompat>
     close(): Promise<void>
   }>
   create?(header: Session['header'], options: { inheritedEventCount: SessionLogOffset }): Promise<{
@@ -752,7 +792,7 @@ async function readStoredLog(ctx: Context, sessionId: SessionId): Promise<Inheri
   if (persistence?.open !== undefined) {
     const handle = await persistence.open(sessionId, 'read')
     try {
-      return { events: await handle.read(), inherited: handle.inheritedEventCount }
+      return { events: persistenceEvents(await handle.read()), inherited: handle.inheritedEventCount }
     } finally {
       await handle.close()
     }
