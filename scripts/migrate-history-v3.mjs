@@ -29,7 +29,9 @@ import {
   sessionFormatV0ToV1,
 } from '@deepseek-ai/dsh-session-format-v0-to-v1'
 import {
+  assertReleasedV2Header,
   releasedV2SessionFormatCodec,
+  restoreReleasedV2Artifact,
   sessionFormatV1ToV2,
 } from '@deepseek-ai/dsh-session-format-v1-to-v2'
 import {
@@ -46,8 +48,25 @@ const CHECKSUM_OPTIONS = { params: { [constants.ZSTD_c_checksumFlag]: 1 } }
 const PROXY_PREFIX = 'dsh-message-edit-v3-migration:'
 const CURRENT_VERSION = 3
 
+const restoreV2 = artifact => restoreReleasedV2Artifact(artifact, new Set())
 const restoreV3 = artifact => restoreReleasedV3Artifact(artifact, new Set())
-const catalog = createSessionFormatCatalog({
+const catalogV2 = createSessionFormatCatalog({
+  currentVersion: 2,
+  codecs: [
+    releasedV0SessionFormatCodec,
+    releasedV1SessionFormatCodec,
+    releasedV2SessionFormatCodec,
+  ],
+  migrations: [sessionFormatV0ToV1, sessionFormatV1ToV2],
+  restoreCurrentHeader(header) {
+    assertReleasedV2Header(header)
+    return header
+  },
+  restoreCurrent: restoreV2,
+  currentEncoder: releasedV2SessionFormatCodec,
+  restoreTransformedCurrent: restoreV2,
+})
+const catalogV3 = createSessionFormatCatalog({
   currentVersion: CURRENT_VERSION,
   codecs: [
     releasedV0SessionFormatCodec,
@@ -368,16 +387,35 @@ function normalizeRetiredV0(headerValue, rows) {
 
 function normalizeHistoricalInput(headerValue, rows) {
   const version = count(headerValue?.version, 'Session header version')
-  const retiredV2Shape = version === 0 && rows.some(row => (
-    typeof row?.type === 'string' && row.type.startsWith('message-edit/')
-    || row?.type === 'assistant/message' && row.data?.stream !== undefined
-  ))
-  if (retiredV2Shape) return normalizeRetiredV0(headerValue, rows)
-
-  const entries = rows.map(source => {
-    const event = clone(jsonRecord(source, `format v${version} event`))
-    return { event, originSeq: count(event.seq, `${event.type} seq`) }
+  const normalizedRows = rows.map(source => {
+    const row = clone(jsonRecord(source, `format v${version} row`))
+    if (version === 0 && row.type === 'permission/preset' && row.data?.origin !== undefined) {
+      delete row.data.origin
+    }
+    if (version === 0 && row.type === 'turn/end'
+      && row.data?.reason?.kind === 'aborted'
+      && row.data.reason.reason?.stack !== undefined) {
+      delete row.data.reason.reason.stack
+    }
+    return row
   })
+  const retiredV2Shape = version === 0 && normalizedRows.some(row => (
+    row?.type === 'assistant/message' && row.data?.stream !== undefined
+  ))
+  if (retiredV2Shape) return normalizeRetiredV0(headerValue, normalizedRows)
+
+  const entries = normalizedRows.map(event => {
+    return {
+      event,
+      originSeq: event.seq === undefined ? undefined : count(event.seq, `${event.type} seq`),
+    }
+  })
+  // Released codecs may store auxiliary physical rows such as
+  // reasoning-chunks beside ordinary events. Their seq is reconstructed by
+  // the codec, so pre-migration event resequencing must not touch the stream.
+  if (entries.some(entry => entry.originSeq === undefined)) {
+    return { header: clone(headerValue), rows: entries.map(entry => entry.event) }
+  }
   let inheritedCut
   if (version === 0 || version === 1) inheritedCut = count(headerValue.seedLength ?? 0, `format v${version} seedLength`)
   else {
@@ -405,10 +443,23 @@ function proxyMessageEditEvents(sessionId, rows) {
   return { rows: output, proxies }
 }
 
-function migrateWithCatalog(headerValue, rows) {
+function restoreWithCatalog(catalog, headerValue, rows) {
   const restore = catalog.createRestore(headerValue, { recovery: 'strict', validation: 'transformed' })
   for (const row of rows) restore.decodeRow(row)
   return restore.finish()
+}
+
+function migrateHistoricalArtifact(headerValue, rows) {
+  const artifact = restoreWithCatalog(catalogV2, headerValue, rows)
+  const entries = artifact.events.map(event => ({
+    event: clone(event),
+    originSeq: count(event.seq, `${event.type} seq`),
+  }))
+  const changed = reorderLegacySteps(entries, artifact.inheritedEventCount)
+  const events = changed ? resequence(entries) : entries.map(entry => entry.event)
+  const header = catalogV2.encodeCurrentHeader(artifact.header, artifact.inheritedEventCount)
+  const encodedRows = events.map(event => catalogV2.encodeCurrentEvent(event))
+  return restoreWithCatalog(catalogV3, header, encodedRows)
 }
 
 function outputMessageSeqs(artifact) {
@@ -455,41 +506,47 @@ function finalizePlan(plan, plans, warnings) {
       ignorable: true,
     }
   })
-  const header = catalog.encodeCurrentHeader(plan.artifact.header, plan.artifact.inheritedEventCount)
-  const rows = events.map(event => catalog.encodeCurrentEvent(event))
+  const header = catalogV3.encodeCurrentHeader(plan.artifact.header, plan.artifact.inheritedEventCount)
+  const rows = events.map(event => catalogV3.encodeCurrentEvent(event))
   // Re-read the exact physical output before any filesystem mutation.
-  migrateWithCatalog(header, rows)
+  restoreWithCatalog(catalogV3, header, rows)
   return { header, rows }
 }
 
 async function preparePlan(sourcePath, generation) {
-  const values = await decodeContainer(sourcePath, generation.compression)
-  const rawHeader = values[0]
-  const rawRows = values.slice(1)
-  if (rawHeader?.version !== generation.version) {
-    throw new Error(`filename generation v${generation.version} disagrees with header v${rawHeader?.version}`)
-  }
-  const messages = sourceMessages(rawRows)
-  const normalized = normalizeHistoricalInput(rawHeader, rawRows)
-  const id = normalized.header.id
-  if (typeof id !== 'string' || id.length === 0) throw new Error('Session header lacks id')
-  const proxied = proxyMessageEditEvents(id, normalized.rows)
-  const artifact = migrateWithCatalog(normalized.header, proxied.rows)
-  const targetMessages = outputMessageSeqs(artifact)
-  const oldMessageSeqToV3 = new Map()
-  for (const [oldSeq, identity] of messages) {
-    const target = targetMessages.get(identity)
-    if (target !== undefined) oldMessageSeqToV3.set(oldSeq, target)
-  }
-  return {
-    id,
-    sourcePath,
-    outputPath: resolve(dirname(sourcePath), `session.v3.jsonl${generation.compression === 'zstd' ? '.zstd' : ''}`),
-    compression: generation.compression,
-    sourceVersion: generation.version,
-    proxies: proxied.proxies,
-    artifact,
-    oldMessageSeqToV3,
+  try {
+    const values = await decodeContainer(sourcePath, generation.compression)
+    const rawHeader = values[0]
+    const rawRows = values.slice(1)
+    if (rawHeader?.version !== generation.version) {
+      throw new Error(`filename generation v${generation.version} disagrees with header v${rawHeader?.version}`)
+    }
+    const messages = sourceMessages(rawRows)
+    const normalized = normalizeHistoricalInput(rawHeader, rawRows)
+    const id = normalized.header.id
+    if (typeof id !== 'string' || id.length === 0) throw new Error('Session header lacks id')
+    const proxied = proxyMessageEditEvents(id, normalized.rows)
+    const artifact = migrateHistoricalArtifact(normalized.header, proxied.rows)
+    const targetMessages = outputMessageSeqs(artifact)
+    const oldMessageSeqToV3 = new Map()
+    for (const [oldSeq, identity] of messages) {
+      const target = targetMessages.get(identity)
+      if (target !== undefined) oldMessageSeqToV3.set(oldSeq, target)
+    }
+    return {
+      id,
+      sourcePath,
+      outputPath: resolve(dirname(sourcePath), `session.v3.jsonl${generation.compression === 'zstd' ? '.zstd' : ''}`),
+      compression: generation.compression,
+      sourceVersion: generation.version,
+      proxies: proxied.proxies,
+      artifact,
+      oldMessageSeqToV3,
+    }
+  } catch (error) {
+    throw new Error(`cannot migrate ${sourcePath}: ${error instanceof Error ? error.message : String(error)}`, {
+      cause: error,
+    })
   }
 }
 

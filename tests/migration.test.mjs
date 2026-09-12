@@ -101,3 +101,58 @@ test('0.1.2 pre-migration keeps the old log and publishes a validated v3 sibling
     await rm(home, { recursive: true, force: true })
   }
 })
+
+test('released v0 packed chunks and transitional metadata migrate through normalized v2 order', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-message-edit-packed-migration-'))
+  try {
+    const sessionId = 'session-packed-fixture'
+    const directory = join(home, 'sessions', '--fixture--', sessionId)
+    const source = join(directory, 'session.jsonl.zstd')
+    await mkdir(directory, { recursive: true })
+    const time = 1_750_100_000_000
+    await writeLegacyArtifact(source, {
+      type: 'session', version: 0, id: sessionId, createdAt: time,
+      cwd: 'F:\\fixture', seedLength: 0, delegationDepth: 0,
+    }, [
+      { type: 'permission/preset', seq: 0, time, data: { preset: 'default', origin: 'profile' } },
+      { type: 'turn/start', seq: 1, time: time + 1, data: { turn: 1 } },
+      {
+        type: 'user/message', seq: 2, time: time + 2, surfaceOp: 'append', data: {
+          id: 'packed-user', role: 'user', content: [{ type: 'text', text: 'question' }],
+          source: { kind: 'user' },
+        },
+      },
+      { type: 'step/start', seq: 3, time: time + 3, data: { turn: 1, step: 1 } },
+      {
+        type: 'reasoning-chunks', seq0: 4, time0: time + 4,
+        data: { turn: 1, step: 1, index: 0, dt: [1, 1], texts: ['a', 'b', 'c'] },
+      },
+      {
+        type: 'assistant/message', seq: 7, time: time + 7, surfaceOp: 'append',
+        sourceEventSeqs: [[4, 6]], data: {
+          turn: 1, step: 1, message: {
+            id: 'packed-assistant', role: 'assistant', content: [{ type: 'reasoning', text: 'abc' }],
+            source: { kind: 'model', provider: 'fixture', model: 'fixture' },
+          },
+        },
+      },
+      { type: 'step/end', seq: 8, time: time + 8, data: { turn: 1, step: 1 } },
+      {
+        type: 'turn/end', seq: 9, time: time + 9,
+        data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user', stack: 'legacy debug stack' } } },
+      },
+    ])
+
+    const report = await migrateHistory({ dshHome: home, apply: true })
+    assert.equal(report.selectedSessions, 1)
+    assert.deepEqual(report.warnings, [])
+    const migrated = await readCompressedArtifact(join(directory, 'session.v3.jsonl.zstd'))
+    assert.equal(migrated[0].version, 3)
+    assert.ok(migrated.findIndex(event => event.type === 'step/start')
+      < migrated.findIndex(event => event.type === 'user/message'))
+    assert.equal(migrated.find(event => event.type === 'permission/preset').data.origin, undefined)
+    assert.equal(migrated.find(event => event.type === 'turn/end').data.reason.reason.stack, undefined)
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
