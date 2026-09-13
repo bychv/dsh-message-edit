@@ -16,6 +16,11 @@
 dsh plugin --profile web add github:bychv/dsh-message-edit#main
 ```
 
+> **从 DSH 0.1.2 升级前请先迁移历史：** 不要先升级 DSH，也不要先切换到本仓库的
+> `alpha` 分支。请保持旧版 DSH 停止运行，在当前 `main` 分支中执行
+> [`migrate:history`](#升级-dsh-前迁移历史记录)，确认迁移成功后再升级。该工具专门用于把
+> 0.1.2 时代的会话预先转换为新版可加载的 format v3，避免升级后才发现旧聊天记录无法打开。
+
 本 fork 当前预发布版本为 `0.2.5-alpha.1`，已支持 DeepSeek Harness `0.1.2-rc.1`，并提供升级到新版 DSH 前使用的历史记录迁移工具。插件版本号中的 `alpha` 后缀不表示仅支持 DSH alpha 版本。
 
 如使用 DSH alpha 版本，请切换到本仓库的 [`alpha` 分支](https://github.com/bychv/dsh-message-edit/tree/alpha)获取对应的兼容性修复。
@@ -131,24 +136,45 @@ npm run build
 
 ## 升级 DSH 前迁移历史记录
 
-如果当前仍在使用 DSH `0.1.2`（已用 `0.1.2-rc.1` 验证），并准备升级到本仓库 `alpha` 分支对应的新版 DSH，请在升级 DSH **之前**运行迁移工具。旧版产生的是一套过渡期 Session 格式；直接升级后，新版 DSH 可能拒绝加载这些记录。迁移工具会使用官方格式迁移器生成新版可读的 `session.v3.jsonl` 或 `session.v3.jsonl.zstd`，并为所有 `message-edit/*` 事件补上 `ignorable: true`。
+此工具供仍在使用 DSH `0.1.2`（已用 `0.1.2-rc.1` 验证）、准备升级到 format v3
+版本的用户使用。迁移必须在 **0.1.2 环境仍可用、且新版 DSH 尚未接管历史之前**完成。
+旧版产生的是一套过渡期 Session 格式；直接升级后，新版 DSH 可能拒绝加载这些记录。
 
-先停止 DSH，在本仓库 `main` 分支目录安装依赖并执行只读检查：
+迁移工具会扫描指定 `DSH_HOME` 下的全部会话，使用官方格式迁移器生成新版优先读取的
+`session.v3.jsonl` 或 `session.v3.jsonl.zstd`，并为所有 `message-edit/*` 事件补上
+`ignorable: true`。没有相关旧记录的会话也会按官方格式迁移，因此不需要逐个挑选会话。
+
+推荐顺序：
+
+1. 保留 DSH `0.1.2` 和本插件 `main` 分支，停止所有 DSH 进程。
+2. 备份整个 `DSH_HOME`；Windows 默认通常是 `%USERPROFILE%\.dsh`，但请以自己的实际配置为准。
+3. 在本仓库 `main` 分支目录安装依赖，先执行 dry-run（只读检查）：
 
 ```bash
 npm install
 npm run migrate:history -- --dsh-home "你的 DSH_HOME 绝对路径"
 ```
 
-确认报告中的 `warnings` 为空，再实际迁移：
+4. 确认命令成功退出且报告中的 `warnings` 为空，再执行实际迁移：
 
 ```bash
 npm run migrate:history -- --dsh-home "你的 DSH_HOME 绝对路径" --apply
 ```
 
-迁移过程不会删除或改写旧的 `session.jsonl*`：旧 DSH 仍读取原文件，新 DSH 会优先读取同目录的新 v3 文件。同时，工具会在 `DSH_HOME/backups/dsh-message-edit-v3-时间戳/` 下保存逐文件备份和 `manifest.json`。因此应在 DSH `0.1.2` 停止运行后执行迁移，迁移完成后不要再用旧版继续产生会话，再升级 DSH 并切换插件的 `alpha` 分支。
+5. 再运行一次 dry-run；已迁移会话应不再被选中。随后升级 DSH，并把插件切换到与新版
+   DSH 对应的 `alpha` 分支。迁移完成后不要再用旧版 DSH 继续产生会话。
 
-如果 dry-run 或 apply 报错，或者 `warnings` 非空，请先保留原环境和备份，不要继续升级。工具默认不猜测 `DSH_HOME`，以避免迁移到错误的 profile；`--help` 可查看参数。
+迁移过程不会删除或改写旧的 `session.jsonl*`：旧文件仍会保留，新版 DSH 会优先读取同目录的
+v3 文件。同时，工具会在 `DSH_HOME/backups/dsh-message-edit-v3-时间戳/` 下保存逐文件备份和
+`manifest.json`。如需把备份放到其他位置，可使用：
+
+```bash
+npm run migrate:history -- --dsh-home "你的 DSH_HOME 绝对路径" --apply --backup-dir "备份目录绝对路径"
+```
+
+如果 dry-run 或 apply 报错，或者 `warnings` 非空，请保留旧环境和备份，
+不要继续升级。工具不会猜测 `DSH_HOME`，必须显式传入绝对路径，以免迁移到错误的数据目录。
+运行 `npm run migrate:history -- --help` 可查看全部参数。
 
 ## 安装
 
