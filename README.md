@@ -16,9 +16,9 @@
 dsh plugin --profile web add github:bychv/dsh-message-edit#alpha
 ```
 
-本 fork 当前预发布版本为 `0.2.6-alpha.1`，适配并以 DeepSeek Harness `0.1.5-rc.2` 为沙盒测试基线，同时保留旧版会话格式的运行时兼容路径。
+本 fork 当前预发布版本为 `0.2.6-alpha.2`，适配并以 DeepSeek Harness `0.1.5-rc.2` 为测试基线，同时保留旧版会话格式的运行时兼容路径。
 
-本次修复包括：适配 format v3 持久化 `read()` 返回的 `{ events, eventState }`，在恢复 Session 时传递 v3 要求的事件所有权状态，并继续兼容旧版直接返回事件数组的读取接口。助手消息仍使用格式要求的嵌入式空 `stream`，不沿用与编辑后内容不一致的模型流；`message-edit/*` 事件继续带有 `ignorable: true`。
+本次修复包括：适配 format v3 持久化 `read()` 返回的 `{ events, eventState }`，在恢复 Session 时传递 v3 要求的事件所有权状态，并继续兼容旧版直接返回事件数组的读取接口；创建编辑或重试分支时会先清除分支边界继承的持久化 inbox 输入，避免同一用户消息重复排队。助手消息仍使用格式要求的嵌入式空 `stream`，不沿用与编辑后内容不一致的模型流；`message-edit/*` 事件继续带有 `ignorable: true`。
 
 > **旧数据升级限制：** “兼容旧版运行时”不等于已有 format v2 插件分支可直接迁移到 format v3。DSH `0.1.5-rc.2` 的内置 v2→v3 迁移器会在插件加载前拒绝未被核心分类的 `message-edit/version` 事件，即使该事件带有 `ignorable: true`；插件无法在正常启动流程中拦截这一阶段。升级含有本插件旧分支的 profile 前请备份数据并保留旧 DSH 环境。本版已验证的是 format v3 下新建版本、二级分支、落盘历史冷重启与冷恢复后再次编辑。
 

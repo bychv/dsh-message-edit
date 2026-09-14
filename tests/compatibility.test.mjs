@@ -32,12 +32,23 @@ test('host bundle loads even when a profile-local session peer lacks SessionLogO
   }
 })
 
-function appendTurn(session, turn) {
-  session.append('turn/start', { turn })
-  session.append('user/message', {
+function appendTurn(session, turn, durableInbox = false) {
+  const user = {
     id: `user-${turn}`, role: 'user', content: [{ type: 'text', text: `question ${turn}` }],
     source: { kind: 'user' },
-  }, { surfaceOp: 'append' })
+  }
+  if (durableInbox) {
+    session.append('agent/inbox/spliced', {
+      target: 'next-turn', start: 0, inserted: [user],
+    })
+  }
+  session.append('turn/start', { turn })
+  if (durableInbox) {
+    session.append('agent/inbox/spliced', {
+      target: 'next-turn', start: 0, removedCount: 1, inserted: [],
+    })
+  }
+  session.append('user/message', user, { surfaceOp: 'append' })
   session.append('step/start', { turn, step: 1 })
   const assistant = session.append('assistant/message', {
     turn, step: 1,
@@ -55,10 +66,10 @@ function appendTurn(session, turn) {
 // Exercise the public HTTP route and the selected real Session validator/fold.
 // Agent execution and persistence I/O are deterministic adapters: no model calls
 // or user profile/history writes are needed for these regression tests.
-function harness() {
+function harness({ durableInbox = false } = {}) {
   const source = Session.create('session-fixture-root')
-  const first = appendTurn(source, 1)
-  const second = appendTurn(source, 2)
+  const first = appendTurn(source, 1, durableInbox)
+  const second = appendTurn(source, 2, durableInbox)
   const live = new Map([[source.id, source]])
   const disk = new Map()
   const creates = []
@@ -251,6 +262,25 @@ test('retry preserves queued inputs while metadata stays ignorable', async () =>
   assert.deepEqual(h.queued.map(message => message.content[0].text), ['question 1', 'question 2'])
   assert.equal(h.creates[0].seed.find(event => event.type === 'message-edit/version').ignorable, true)
   assert.equal(h.creates[0].inheritedEventCount ?? 0, 0)
+  h.assertHandlesClosed()
+})
+
+test('retry clears the inherited durable prompt before queueing its replacement', async () => {
+  const h = harness({ durableInbox: true })
+  const result = await h.request('POST', {
+    action: 'retry', sessionId: h.source.id, turn: 1, cascade: 'truncate',
+  })
+  assert.equal(result.queuedTurns, 1)
+  assert.deepEqual(h.queued.map(message => message.content[0].text), ['question 1'])
+
+  const seed = h.creates[0].seed
+  const branchEvents = seed.slice(h.creates[0].inheritedEventCount)
+  const reset = branchEvents.find(event => event.type === 'agent/inbox/spliced')
+  assert.deepEqual(reset?.data, {
+    target: 'next-turn', start: 0, removedCount: 1, inserted: [], outcome: 'canceled',
+  })
+  assert.ok(branchEvents.findIndex(event => event.type === 'agent/inbox/spliced')
+    < branchEvents.findIndex(event => event.type === 'message-edit/version'))
   h.assertHandlesClosed()
 })
 

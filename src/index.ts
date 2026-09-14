@@ -470,6 +470,37 @@ function appendSurfaceSeedEvent<T extends SurfaceEventType>(
   } as unknown as SessionEvent<T>)
 }
 
+/** A user prompt is durably inserted before turn/start and claimed after it.
+ * Forking immediately before the turn therefore inherits the insertion but not
+ * its matching removal. Cancel that inherited inbox state before publishing the
+ * branch; the operation plan will enqueue exactly the intended replacement. */
+function appendInheritedInboxReset(events: SessionEvent[]): void {
+  const pending: Record<'next-turn' | 'next-step', UserMessage[]> = {
+    'next-turn': [],
+    'next-step': [],
+  }
+  for (const event of events) {
+    if (event.type !== 'agent/inbox/spliced') continue
+    const splice = event.data
+    pending[splice.target].splice(
+      splice.start,
+      splice.removedCount ?? 0,
+      ...splice.inserted,
+    )
+  }
+  for (const target of ['next-step', 'next-turn'] as const) {
+    const removedCount = pending[target].length
+    if (removedCount === 0) continue
+    appendLogSeedEvent(events, 'agent/inbox/spliced', {
+      target,
+      start: 0,
+      removedCount,
+      inserted: [],
+      outcome: 'canceled',
+    })
+  }
+}
+
 function appendManualTurn(events: SessionEvent[], manual: ManualAssistantTurn, embeddedStream: boolean): void {
   const { turn, user, assistant } = manual
   appendLogSeedEvent(events, 'turn/start', { turn })
@@ -497,6 +528,7 @@ function versionSeed(source: Session, plan: OperationPlan): {
   // Array length is already a non-negative safe integer. Keep the brand type-only:
   // profile-local DSH peers may lag behind the services supplied by the host CLI.
   const inheritedLength = events.length as SessionLogOffset
+  appendInheritedInboxReset(events)
   appendLogSeedEvent(events, 'message-edit/version', plan.version)
   if (plan.manualTurn !== undefined) appendManualTurn(events, plan.manualTurn, source.header.version >= 2)
   return { events, inheritedLength }
@@ -584,6 +616,7 @@ async function createStoredVersionAgent(
     ...agentPreset === undefined ? {} : { agentPreset },
   }, inherited)
   const events = [...detached.snapshotEvents()]
+  appendInheritedInboxReset(events)
   appendLogSeedEvent(events, 'message-edit/version', plan.version)
   if (plan.manualTurn !== undefined) appendManualTurn(events, plan.manualTurn, true)
   // Full validation precedes any persistent publication; originals remain untouched.

@@ -288,6 +288,32 @@ function appendSurfaceSeedEvent(events, type, data, intent) {
 		...intent.sourceEventSeqs === void 0 ? {} : { sourceEventSeqs: intent.sourceEventSeqs }
 	});
 }
+/** A user prompt is durably inserted before turn/start and claimed after it.
+* Forking immediately before the turn therefore inherits the insertion but not
+* its matching removal. Cancel that inherited inbox state before publishing the
+* branch; the operation plan will enqueue exactly the intended replacement. */
+function appendInheritedInboxReset(events) {
+	const pending = {
+		"next-turn": [],
+		"next-step": []
+	};
+	for (const event of events) {
+		if (event.type !== "agent/inbox/spliced") continue;
+		const splice = event.data;
+		pending[splice.target].splice(splice.start, splice.removedCount ?? 0, ...splice.inserted);
+	}
+	for (const target of ["next-step", "next-turn"]) {
+		const removedCount = pending[target].length;
+		if (removedCount === 0) continue;
+		appendLogSeedEvent(events, "agent/inbox/spliced", {
+			target,
+			start: 0,
+			removedCount,
+			inserted: [],
+			outcome: "canceled"
+		});
+	}
+}
 function appendManualTurn(events, manual, embeddedStream) {
 	const { turn, user, assistant } = manual;
 	appendLogSeedEvent(events, "turn/start", { turn });
@@ -317,6 +343,7 @@ function appendManualTurn(events, manual, embeddedStream) {
 function versionSeed(source, plan) {
 	const events = inheritedSeed(source, plan.boundary);
 	const inheritedLength = events.length;
+	appendInheritedInboxReset(events);
 	appendLogSeedEvent(events, "message-edit/version", plan.version);
 	if (plan.manualTurn !== void 0) appendManualTurn(events, plan.manualTurn, source.header.version >= 2);
 	return {
@@ -389,6 +416,7 @@ async function createStoredVersionAgent(ctx, source, childId, plan, options, age
 		...agentPreset === void 0 ? {} : { agentPreset }
 	}, inherited);
 	const events = [...detached.snapshotEvents()];
+	appendInheritedInboxReset(events);
 	appendLogSeedEvent(events, "message-edit/version", plan.version);
 	if (plan.manualTurn !== void 0) appendManualTurn(events, plan.manualTurn, true);
 	restoreDetachedSession(SessionClass, childId, structuredClone(events), detached.header, inherited);
