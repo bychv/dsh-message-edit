@@ -155,6 +155,7 @@ window.__ModuleLoader__.load({
 			generation = 0;
 			ctx;
 			sessions;
+			uiWorkspace;
 			sessionSource;
 			sessionSourceDispose;
 			sessionRevision;
@@ -173,6 +174,7 @@ window.__ModuleLoader__.load({
 				this.sessionId = sessionId;
 				this.ctx = ctx;
 				this.sessions = ctx.get("sessions");
+				this.uiWorkspace = ctx.get("uiWorkspace");
 				this.face = {
 					hooks: { messageEdit: this.store },
 					acquire: () => {
@@ -377,7 +379,7 @@ window.__ModuleLoader__.load({
 			/** Session-list publication is the reactive dependency for navigation. */
 			openWhenListed(sessionId) {
 				if (this.sessions.list.getSnapshot().byId[sessionId] !== void 0) {
-					this.sessions.open(sessionId);
+					this.uiWorkspace.openSession(sessionId);
 					return Promise.resolve();
 				}
 				return new Promise((resolve) => {
@@ -388,7 +390,7 @@ window.__ModuleLoader__.load({
 						settled = true;
 						dispose();
 						this.navigationWaits.delete(cancel);
-						if (open) this.sessions.open(sessionId);
+						if (open) this.uiWorkspace.openSession(sessionId);
 						resolve();
 					};
 					const cancel = () => {
@@ -415,15 +417,15 @@ window.__ModuleLoader__.load({
 			document.head.appendChild(tag);
 		}
 		var InlineMessageEdit_module_css_default = {
-			"title": "LRkRdW_title",
 			"input": "LRkRdW_input",
-			"picker": "LRkRdW_picker",
-			"panel": "LRkRdW_panel",
-			"pickerItem": "LRkRdW_pickerItem",
-			"overlay": "LRkRdW_overlay",
 			"footer": "LRkRdW_footer",
+			"panel": "LRkRdW_panel",
+			"picker": "LRkRdW_picker",
+			"overlay": "LRkRdW_overlay",
 			"iconButton": "LRkRdW_iconButton",
-			"pickerItemActive": "LRkRdW_pickerItemActive"
+			"pickerItem": "LRkRdW_pickerItem",
+			"pickerItemActive": "LRkRdW_pickerItemActive",
+			"title": "LRkRdW_title"
 		};
 		//#endregion
 		//#region src/client/InlineMessageEdit.tsx
@@ -716,9 +718,9 @@ window.__ModuleLoader__.load({
 			document.head.appendChild(tag);
 		}
 		var MessageEditHeader_module_css_default = {
-			"iconButton": "kmIVpW_iconButton",
 			"root": "kmIVpW_root",
 			"rerollButton": "kmIVpW_rerollButton",
+			"iconButton": "kmIVpW_iconButton",
 			"counter": "kmIVpW_counter"
 		};
 		//#endregion
@@ -794,55 +796,55 @@ window.__ModuleLoader__.load({
 			document.head.appendChild(tag);
 		}
 		var MessageEditTimelineView_module_css_default = {
-			"versionMeta": "pdbLWq_versionMeta",
-			"turnList": "pdbLWq_turnList",
-			"kindBadge": "pdbLWq_kindBadge",
-			"turnSection": "pdbLWq_turnSection",
 			"notice": "pdbLWq_notice",
-			"messageHeader": "pdbLWq_messageHeader",
-			"pageHeader": "pdbLWq_pageHeader",
-			"editorActions": "pdbLWq_editorActions",
-			"secondaryButton": "pdbLWq_secondaryButton",
-			"editor": "pdbLWq_editor",
-			"editorHint": "pdbLWq_editorHint",
-			"messageList": "pdbLWq_messageList",
-			"headerActions": "pdbLWq_headerActions",
-			"versionMain": "pdbLWq_versionMain",
-			"versionTitle": "pdbLWq_versionTitle",
-			"intro": "pdbLWq_intro",
-			"versionsPanel": "pdbLWq_versionsPanel",
-			"versionDot": "pdbLWq_versionDot",
-			"versionItem": "pdbLWq_versionItem",
-			"messageTime": "pdbLWq_messageTime",
-			"root": "pdbLWq_root",
-			"versionDiff": "pdbLWq_versionDiff",
-			"turnPreview": "pdbLWq_turnPreview",
-			"messageCard": "pdbLWq_messageCard",
-			"subtitle": "pdbLWq_subtitle",
-			"versionButton": "pdbLWq_versionButton",
-			"effectButtons": "pdbLWq_effectButtons",
-			"count": "pdbLWq_count",
-			"textarea": "pdbLWq_textarea",
-			"versionList": "pdbLWq_versionList",
-			"title": "pdbLWq_title",
 			"primaryButton": "pdbLWq_primaryButton",
-			"pathBadge": "pdbLWq_pathBadge",
-			"versionLine": "pdbLWq_versionLine",
-			"effectControls": "pdbLWq_effectControls",
-			"currentBadge": "pdbLWq_currentBadge",
-			"turnHeader": "pdbLWq_turnHeader",
-			"status": "pdbLWq_status",
-			"messageText": "pdbLWq_messageText",
-			"error": "pdbLWq_error",
-			"sectionHeading": "pdbLWq_sectionHeading",
-			"cascadeField": "pdbLWq_cascadeField",
-			"effectDepth": "pdbLWq_effectDepth",
-			"select": "pdbLWq_select",
 			"empty": "pdbLWq_empty",
-			"textButton": "pdbLWq_textButton",
+			"versionMeta": "pdbLWq_versionMeta",
+			"versionList": "pdbLWq_versionList",
+			"versionItem": "pdbLWq_versionItem",
+			"messageText": "pdbLWq_messageText",
+			"messageHeader": "pdbLWq_messageHeader",
+			"messageCard": "pdbLWq_messageCard",
+			"turnPreview": "pdbLWq_turnPreview",
+			"versionDiff": "pdbLWq_versionDiff",
+			"secondaryButton": "pdbLWq_secondaryButton",
+			"turnList": "pdbLWq_turnList",
+			"currentBadge": "pdbLWq_currentBadge",
+			"messageList": "pdbLWq_messageList",
+			"messageTime": "pdbLWq_messageTime",
+			"intro": "pdbLWq_intro",
+			"turnSection": "pdbLWq_turnSection",
+			"turnHeader": "pdbLWq_turnHeader",
+			"pageHeader": "pdbLWq_pageHeader",
+			"select": "pdbLWq_select",
+			"versionDot": "pdbLWq_versionDot",
+			"cascadeField": "pdbLWq_cascadeField",
+			"editor": "pdbLWq_editor",
+			"columns": "pdbLWq_columns",
+			"effectControls": "pdbLWq_effectControls",
+			"subtitle": "pdbLWq_subtitle",
+			"versionsPanel": "pdbLWq_versionsPanel",
+			"textarea": "pdbLWq_textarea",
+			"root": "pdbLWq_root",
+			"title": "pdbLWq_title",
 			"turnsPanel": "pdbLWq_turnsPanel",
+			"effectDepth": "pdbLWq_effectDepth",
+			"count": "pdbLWq_count",
+			"error": "pdbLWq_error",
+			"versionLine": "pdbLWq_versionLine",
+			"status": "pdbLWq_status",
+			"effectButtons": "pdbLWq_effectButtons",
+			"kindBadge": "pdbLWq_kindBadge",
+			"versionMain": "pdbLWq_versionMain",
+			"textButton": "pdbLWq_textButton",
 			"turnTitle": "pdbLWq_turnTitle",
-			"columns": "pdbLWq_columns"
+			"headerActions": "pdbLWq_headerActions",
+			"pathBadge": "pdbLWq_pathBadge",
+			"sectionHeading": "pdbLWq_sectionHeading",
+			"editorActions": "pdbLWq_editorActions",
+			"editorHint": "pdbLWq_editorHint",
+			"versionButton": "pdbLWq_versionButton",
+			"versionTitle": "pdbLWq_versionTitle"
 		};
 		//#endregion
 		//#region src/client/MessageEditTimelineView.tsx
@@ -1206,7 +1208,8 @@ window.__ModuleLoader__.load({
 			"slots",
 			"conversation",
 			"connection",
-			"sessions"
+			"sessions",
+			"uiWorkspace"
 		];
 		/** Register both UI contributions over one per-session controller identity. */
 		function apply(ctx) {

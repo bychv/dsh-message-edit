@@ -9,9 +9,9 @@ import { test } from 'node:test'
 const { Session } = await import(process.env.DSH_TEST_SESSION_MODULE ?? '@deepseek-ai/dsh-session')
 import { apply } from '../index.mjs'
 
-function restoreSession(id, events, header, inheritedEventCount) {
+function restoreSession(id, events, header, inheritedEventCount, projections) {
   // DSH format v3 requires the ownership state; v2 ignores the extra argument.
-  return Session.fromRestore(id, events, header, inheritedEventCount, 'detached')
+  return Session.fromRestore(id, events, header, inheritedEventCount, 'detached', projections)
 }
 
 test('host bundle loads even when a profile-local session peer lacks SessionLogOffset', async () => {
@@ -66,9 +66,13 @@ function appendTurn(session, turn, durableInbox = false) {
 // Exercise the public HTTP route and the selected real Session validator/fold.
 // Agent execution and persistence I/O are deterministic adapters: no model calls
 // or user profile/history writes are needed for these regression tests.
-function harness({ durableInbox = false } = {}) {
-  const source = Session.create('session-fixture-root')
+function harness({ durableInbox = false, messageProjection } = {}) {
+  const projections = messageProjection === undefined ? undefined : [messageProjection]
+  const source = Session.create('session-fixture-root', undefined, undefined, undefined, projections)
   const first = appendTurn(source, 1, durableInbox)
+  if (messageProjection !== undefined) {
+    source.append('image/offload', { targets: [] })
+  }
   const second = appendTurn(source, 2, durableInbox)
   const live = new Map([[source.id, source]])
   const disk = new Map()
@@ -101,6 +105,7 @@ function harness({ durableInbox = false } = {}) {
     effect: callback => callback(),
     webServer: { register: value => { route = value.handler; return () => {} } },
     sessions: {
+      ...(projections === undefined ? {} : { messageProjections: projections }),
       get: id => live.get(id),
       flush: async session => { persist(session); return true },
     },
@@ -111,13 +116,19 @@ function harness({ durableInbox = false } = {}) {
         const session = Session.create(options.sessionId, options.seed, {
           version: source.header.version, id: options.sessionId, createdAt: Date.now(),
           isSeeded: false, ...options.meta,
-        }, options.inheritedEventCount)
+        }, options.inheritedEventCount, projections)
         live.set(session.id, session)
         return { agent: agent(session), dispose: async () => live.delete(session.id) }
       },
       resume: async ({ resumeSessionId }) => {
         const stored = read(resumeSessionId)
-        const session = restoreSession(resumeSessionId, stored.events, stored.header, stored.inheritedEventCount)
+        const session = restoreSession(
+          resumeSessionId,
+          stored.events,
+          stored.header,
+          stored.inheritedEventCount,
+          projections,
+        )
         live.set(session.id, session)
         return { agent: agent(session), dispose: async () => live.delete(session.id) }
       },
@@ -187,6 +198,31 @@ function harness({ durableInbox = false } = {}) {
     },
   }
 }
+
+test('detached version creation forwards host message projections', {
+  skip: Session.create.length < 5,
+}, async () => {
+  const projection = {
+    type: 'image/offload',
+    project: () => new Map(),
+  }
+  const h = harness({ messageProjection: projection })
+  const result = await h.request('POST', {
+    action: 'edit', sessionId: h.source.id, eventSeq: h.second.seq,
+    blockIndex: 0, text: 'projected-history edit', cascade: 'truncate',
+  })
+  const stored = h.read(result.sessionId)
+  assert.ok(stored.events.some(event => event.type === 'image/offload'))
+  const restored = restoreSession(
+    result.sessionId,
+    stored.events,
+    stored.header,
+    stored.inheritedEventCount,
+    [projection],
+  )
+  assert.equal(restored.deriveMessages().at(-1).content[0].text, 'projected-history edit')
+  h.assertHandlesClosed()
+})
 
 for (const turn of [1, 2]) {
   test(`assistant edit in turn ${turn} survives cold restore with the exact inheritance cut`, async () => {

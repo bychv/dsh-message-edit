@@ -10,7 +10,7 @@ import type {
   VersionOperation,
   VersionSummary,
 } from '../shared.ts'
-import type { MessageEditFace } from './controller.ts'
+import type { MessageEditFace, MessageEditState } from './controller.ts'
 import styles from './MessageEditTimelineView.module.css'
 
 type MessageEditTimelineViewProps = ConvViewProps & InjectFace<MessageEditFace>
@@ -176,7 +176,7 @@ export function MessageEditTimelineView({
   reroll,
   openVersion,
 }: MessageEditTimelineViewProps): ReactNode {
-  const state = useMessageEdit(value => value)
+  const state = useMessageEdit((value: MessageEditState) => value)
   const [cascade, setCascade] = useState<CascadePolicy>('truncate')
   const [editing, setEditing] = useState<EditingState | null>(null)
 
@@ -196,7 +196,9 @@ export function MessageEditTimelineView({
   useEffect(() => {
     setEditing((current) => {
       if (current === null || timeline === null) return current
-      return timeline.messages.some(message => message.key === current.message.key) ? current : null
+      return timeline.messages.some((message: EditableMessageBlock) => (
+        message.key === current.message.key
+      )) ? current : null
     })
   }, [timeline])
 
@@ -288,7 +290,7 @@ export function MessageEditTimelineView({
             </div>
           </div>
           <ol className={styles['versionList']}>
-            {timeline.versions.map(version => (
+            {timeline.versions.map((version: VersionSummary) => (
               <VersionRow
                 key={version.sessionId}
                 version={version}

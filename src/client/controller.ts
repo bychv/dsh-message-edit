@@ -7,6 +7,7 @@ import type {
 } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { ObservableSnapshot, SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
+import type { UiWorkspace } from '@deepseek-ai/dsh-client-ui-workspace/client'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import {
   MESSAGE_EDIT_PATH,
@@ -213,6 +214,7 @@ export class MessageEditController {
   private generation = 0
   private readonly ctx: ClientContext
   private readonly sessions: ISessions
+  private readonly uiWorkspace: UiWorkspace
   private sessionSource: SessionEventSource | undefined
   private sessionSourceDispose: (() => void) | undefined
   private sessionRevision: number | undefined
@@ -234,6 +236,7 @@ export class MessageEditController {
   ) {
     this.ctx = ctx
     this.sessions = ctx.get('sessions') as unknown as ISessions
+    this.uiWorkspace = ctx.get('uiWorkspace') as unknown as UiWorkspace
     this.face = {
       hooks: { messageEdit: this.store },
       acquire: () => {
@@ -449,7 +452,7 @@ export class MessageEditController {
   /** Session-list publication is the reactive dependency for navigation. */
   private openWhenListed(sessionId: SessionId): Promise<void> {
     if (this.sessions.list.getSnapshot().byId[sessionId] !== undefined) {
-      this.sessions.open(sessionId)
+      this.uiWorkspace.openSession(sessionId)
       return Promise.resolve()
     }
     return new Promise((resolve) => {
@@ -460,7 +463,7 @@ export class MessageEditController {
         settled = true
         dispose()
         this.navigationWaits.delete(cancel)
-        if (open) this.sessions.open(sessionId)
+        if (open) this.uiWorkspace.openSession(sessionId)
         resolve()
       }
       const cancel = (): void => { finish(false) }

@@ -606,7 +606,9 @@ async function createStoredVersionAgent(
   const inherited = prefix.length as SessionLogOffset
   // Borrow the host's actual class identity without importing profile-local peers.
   const SessionClass = source.constructor as typeof Session
-  const detached = SessionClass.create(childId, prefix, {
+  const projections = sessionMessageProjections(ctx)
+  const create = SessionClass.create as unknown as SessionCreateCompat
+  const detached = create(childId, prefix, {
     version: source.header.version,
     id: childId,
     createdAt: Date.now(),
@@ -614,13 +616,20 @@ async function createStoredVersionAgent(
     parentSession: source.id,
     ...source.header.cwd === undefined ? {} : { cwd: source.header.cwd },
     ...agentPreset === undefined ? {} : { agentPreset },
-  }, inherited)
+  }, inherited, projections)
   const events = [...detached.snapshotEvents()]
   appendInheritedInboxReset(events)
   appendLogSeedEvent(events, 'message-edit/version', plan.version)
   if (plan.manualTurn !== undefined) appendManualTurn(events, plan.manualTurn, true)
   // Full validation precedes any persistent publication; originals remain untouched.
-  restoreDetachedSession(SessionClass, childId, structuredClone(events), detached.header, inherited)
+  restoreDetachedSession(
+    SessionClass,
+    childId,
+    structuredClone(events),
+    detached.header,
+    inherited,
+    projections,
+  )
   const handle = await persistence.create(detached.header, { inheritedEventCount: inherited })
   try {
     await handle.append(events)
@@ -766,6 +775,24 @@ interface InheritedLog {
 
 type SessionSeedEventStateCompat = 'detached' | 'shared-frozen'
 
+/** Opaque bridge for projection definitions introduced after the oldest
+ * supported DSH type baseline. The host owns and validates their shape. */
+type SessionMessageProjectionCompat = unknown
+
+interface SessionStoreProjectionCompat {
+  readonly messageProjections?: readonly SessionMessageProjectionCompat[]
+}
+
+interface SessionCreateCompat {
+  (
+    id: SessionId,
+    seed?: readonly SessionEvent[],
+    header?: Session['header'],
+    inheritedEventCount?: SessionLogOffset,
+    projections?: readonly SessionMessageProjectionCompat[],
+  ): Session
+}
+
 type PersistenceReadResultCompat = readonly SessionEvent[] | {
   readonly events: readonly SessionEvent[]
   readonly eventState: SessionSeedEventStateCompat
@@ -778,7 +805,17 @@ interface SessionRestoreCompat {
     header: Session['header'],
     inheritedEventCount: SessionLogOffset,
     eventState?: SessionSeedEventStateCompat,
+    projections?: readonly SessionMessageProjectionCompat[],
   ): Session
+}
+
+/** Borrow the active profile's projection catalog when available. Detached
+ * replay must receive the same interpreters as live SessionStore operations. */
+function sessionMessageProjections(
+  ctx: Context,
+): readonly SessionMessageProjectionCompat[] | undefined {
+  const projections = (ctx.sessions as unknown as SessionStoreProjectionCompat).messageProjections
+  return Array.isArray(projections) ? projections : undefined
 }
 
 /** DSH v3 requires an explicit seed ownership state; older runtimes ignore the
@@ -790,9 +827,10 @@ function restoreDetachedSession(
   events: readonly SessionEvent[],
   header: Session['header'],
   inheritedEventCount: SessionLogOffset,
+  projections?: readonly SessionMessageProjectionCompat[],
 ): Session {
   const restore = SessionClass.fromRestore as unknown as SessionRestoreCompat
-  return restore(id, events, header, inheritedEventCount, 'detached')
+  return restore(id, events, header, inheritedEventCount, 'detached', projections)
 }
 
 function persistenceEvents(result: PersistenceReadResultCompat): readonly SessionEvent[] {

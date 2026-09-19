@@ -5,13 +5,14 @@ import type {} from '@deepseek-ai/dsh-client-connection/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
+import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import { MESSAGE_EDIT_VIEW_ORDER } from '../shared.ts'
 import { MessageEditController } from './controller.ts'
 import { MessageEditHeader } from './MessageEditHeader.tsx'
 import { MessageEditTimelineView } from './MessageEditTimelineView.tsx'
 
 /** Explicit value sources and slot declaration-order edges. */
-export const inject = ['slots', 'conversation', 'connection', 'sessions']
+export const inject = ['slots', 'conversation', 'connection', 'sessions', 'uiWorkspace']
 
 /** Register both UI contributions over one per-session controller identity. */
 export function apply(ctx: ClientContext): void {

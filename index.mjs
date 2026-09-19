@@ -406,7 +406,9 @@ async function createStoredVersionAgent(ctx, source, childId, plan, options, age
 	const prefix = inheritedSeed(source, plan.boundary);
 	const inherited = prefix.length;
 	const SessionClass = source.constructor;
-	const detached = SessionClass.create(childId, prefix, {
+	const projections = sessionMessageProjections(ctx);
+	const create = SessionClass.create;
+	const detached = create(childId, prefix, {
 		version: source.header.version,
 		id: childId,
 		createdAt: Date.now(),
@@ -414,12 +416,12 @@ async function createStoredVersionAgent(ctx, source, childId, plan, options, age
 		parentSession: source.id,
 		...source.header.cwd === void 0 ? {} : { cwd: source.header.cwd },
 		...agentPreset === void 0 ? {} : { agentPreset }
-	}, inherited);
+	}, inherited, projections);
 	const events = [...detached.snapshotEvents()];
 	appendInheritedInboxReset(events);
 	appendLogSeedEvent(events, "message-edit/version", plan.version);
 	if (plan.manualTurn !== void 0) appendManualTurn(events, plan.manualTurn, true);
-	restoreDetachedSession(SessionClass, childId, structuredClone(events), detached.header, inherited);
+	restoreDetachedSession(SessionClass, childId, structuredClone(events), detached.header, inherited, projections);
 	const handle = await persistence.create(detached.header, { inheritedEventCount: inherited });
 	try {
 		await handle.append(events);
@@ -534,12 +536,18 @@ function flattenLineage(root, descendants) {
 	visit(descendants, 1);
 	return result;
 }
+/** Borrow the active profile's projection catalog when available. Detached
+* replay must receive the same interpreters as live SessionStore operations. */
+function sessionMessageProjections(ctx) {
+	const projections = ctx.sessions.messageProjections;
+	return Array.isArray(projections) ? projections : void 0;
+}
 /** DSH v3 requires an explicit seed ownership state; older runtimes ignore the
 * extra JavaScript argument. Keep this boundary structural so one bundle can
 * still load against the supported v2-era profile peers. */
-function restoreDetachedSession(SessionClass, id, events, header, inheritedEventCount) {
+function restoreDetachedSession(SessionClass, id, events, header, inheritedEventCount, projections) {
 	const restore = SessionClass.fromRestore;
-	return restore(id, events, header, inheritedEventCount, "detached");
+	return restore(id, events, header, inheritedEventCount, "detached", projections);
 }
 function persistenceEvents(result) {
 	if (Array.isArray(result)) return result;
