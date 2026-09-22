@@ -16,11 +16,21 @@
 dsh plugin --profile web add github:bychv/dsh-message-edit#alpha
 ```
 
-本 fork 当前预发布版本为 `0.2.6-alpha.3`，适配并以 DeepSeek Harness `0.1.6-alpha.2` 为测试基线，同时保留旧版会话格式的运行时兼容路径。
+本 fork 当前预发布版本为 `0.2.6-alpha.5`，适配并以 DeepSeek Harness `0.1.7-alpha.1`（Session format V4）为测试基线，同时保留旧版会话格式的运行时兼容路径。
 
-本次修复包括：适配 format v3 持久化 `read()` 返回的 `{ events, eventState }`，在恢复 Session 时传递 v3 要求的事件所有权状态，并继续兼容旧版直接返回事件数组的读取接口；离线创建和校验分支时复用宿主注册的消息投影，因此包含 `image/offload` 等投影事件的历史也能正常编辑、落盘和冷恢复；创建编辑或重试分支时会先清除分支边界继承的持久化 inbox 输入，避免同一用户消息重复排队。助手消息仍使用格式要求的嵌入式空 `stream`，不沿用与编辑后内容不一致的模型流；`message-edit/*` 事件继续带有 `ignorable: true`。
+本次修复包括：编辑或重试时继承下方输入框当前选择的 provider、model 与 reasoning effort，并把该选择写入新分支，使切换后的模型控件与实际请求路由保持一致；适配 Session format V4 的严格持久化校验及 0.1.7 中更名后的 `@deepseek-ai/dsh-agent-preset-registry`；识别 V3→V4 迁移后被 DSH 命名空间化为 `plugin:message-edit/version` 的旧版本事件，并允许从迁移后的会话继续编辑和创建二级分支。此前的 format v3 事件所有权、宿主消息投影、持久化 inbox 清理及嵌入式空助手 `stream` 兼容逻辑继续保留；新建的 `message-edit/*` 事件仍带有 `ignorable: true`。
 
-> **旧数据升级限制：** “兼容旧版运行时”不等于已有 format v2 插件分支可直接迁移到 format v3。DSH `0.1.5-rc.2` 的内置 v2→v3 迁移器会在插件加载前拒绝未被核心分类的 `message-edit/version` 事件，即使该事件带有 `ignorable: true`；插件无法在正常启动流程中拦截这一阶段。升级含有本插件旧分支的 profile 前请备份数据并保留旧 DSH 环境。本版已验证的是 format v3 下新建版本、二级分支、落盘历史冷重启与冷恢复后再次编辑。
+> **旧数据升级限制：** “兼容旧版运行时”不等于已有 format v2 插件分支可直接迁移到 format v3。DSH `0.1.5-rc.2` 的内置 v2→v3 迁移器会在插件加载前拒绝未被核心分类的 `message-edit/version` 事件，即使该事件带有 `ignorable: true`；插件无法在正常启动流程中拦截这一阶段。升级含有本插件旧分支的 profile 前请备份数据并保留旧 DSH 环境。此限制仍然存在；本版新增并验证的是已处于 format v3 的插件历史向 V4 迁移，以及迁移后的冷恢复与再次编辑。
+
+### 从 Session V3 迁移到 V4
+
+DSH `0.1.7-alpha.1` 的 JSONL 持久化层负责 V3→V4 物理迁移，本插件不会绕过或改写该流程：
+
+1. 第一次只读打开 V3 会话时，DSH 在内存中准备并校验 V4 结果，不写文件；原 `session.v3.jsonl(.zstd)` 保持不变。
+2. 第一次以写方式恢复该会话时，DSH 校验后发布并使用新的 `session.v4.jsonl(.zstd)`，同时保留原 V3 generation，不做覆盖式迁移。
+3. V3 中的 `message-edit/version` 属于未知但可忽略的插件事件，迁移器会将其命名为 `plugin:message-edit/version`。本版同时识别原名和迁移名（也容忍未来重复的 `plugin:` 包装），因此版本树、撤销/重施加以及迁移后再次编辑都能继续工作。
+
+升级 profile 前仍建议完整备份会话目录。Timeline 的只读浏览不会强制发布 V4 文件；恢复会话、继续对话或执行编辑等写路径才会触发 DSH 的惰性发布。此处迁移兼容已用 alpha 沙盒中的真实 JSONL backend 验证，包括 V3 只读准备、V4 后继发布、原 V3 文件保留、V4 冷重载和迁移后二次分支。
 
 Host 通过 DSH 注入的服务运行，`SessionLogOffset` 仅作为编译期类型使用，不在运行时从
 profile 的 `@deepseek-ai/dsh-session` 导入。这避免了 CLI 已升级、profile 尚保留旧 peer
@@ -55,7 +65,7 @@ profile 的 `@deepseek-ai/dsh-session` 导入。这避免了 CLI 已升级、pro
 
 1. 在来源 Agent 的 `runMaintenance()` 内，从已闭合边界取得不可变前缀；第一回合之前使用空前缀。
 2. 旧格式仍通过 `ctx.agents.create({ seed, meta })` 创建完整版本，再调用 `ctx.sessions.flush()`。
-3. Format v2+ 的新建 seed 必须完全等于继承前缀。因此先由宿主的 Session 类构造离线前缀和原生继承标记，再添加可忽略的版本事件及手工回合，并通过 `Session.fromRestore()` 完整验证。Format v3 恢复时显式传递 `detached` 事件所有权状态；支持消息投影的宿主还会把 `ctx.sessions.messageProjections` 同步传给离线构造和恢复。验证通过后使用持久化 handle 的 `create/append/flush/close` 保存，再由 `ctx.agents.resume()` 加载完整历史。
+3. Format v2+ 的新建 seed 必须完全等于继承前缀。因此先由宿主的 Session 类构造离线前缀和原生继承标记，再添加可忽略的版本事件及手工回合，并通过 `Session.fromRestore()` 完整验证。Format v3/V4 恢复时显式传递 `detached` 事件所有权状态；支持消息投影的宿主还会把 `ctx.sessions.messageProjections` 同步传给离线构造和恢复。验证通过后使用持久化 handle 的 `create/append/flush/close` 保存，再由 `ctx.agents.resume()` 加载完整历史；V4 JSONL backend 会在冷读时执行完整生命周期与事件关系校验。
 4. Workspace 挂接与 child Agent 生命周期分别返回原子逆；随后通过 `child.agent.followup()` 排入需要重新执行的用户输入。
 
 Format v2+ 路径的持久化与 Agent 加载是两个阶段：若版本已保存但 Agent 加载失败，错误会包含已保存的会话 ID，便于恢复。当前公开的 append-only 持久化 API 没有删除事务，不能承诺回滚已经保存的版本；原会话始终不改写。
@@ -71,7 +81,7 @@ Format v2+ 路径的持久化与 Agent 加载是两个阶段：若版本已保�
 
 ## 数据模型
 
-每个插件版本在自己的非继承后缀中包含一个 `message-edit/version` 事件：
+每个插件版本在自己的非继承后缀中包含一个 `message-edit/version` 事件；由 V3 升级而来的 V4 历史中，该事件名为 `plugin:message-edit/version`，两者语义相同：
 
 该插件自定义事件在 seed 信封中带有 `ignorable: true`。这样 DeepSeek Harness 0.1.2-alpha
 及其他启用未知事件保护的版本可以安全跳过不认识的 `message-edit/*` 事件，冷启动或重新加载时
@@ -122,16 +132,16 @@ npm install
 npm run build
 ```
 
-构建基于 npm 发布的 `@deepseek-ai/*@0.1.6-alpha.2` 类型与本地工具链（typescript、tsdown、lightningcss），不再依赖 dsh 源码树。构建生成：
+构建基于 npm 发布的 `@deepseek-ai/*@0.1.7-alpha.1` 类型与本地工具链（typescript、tsdown、lightningcss），不再依赖 dsh 源码树。构建生成：
 
 - `index.mjs`：Host 插件
 - `client.js`：Browser 插件
 - `client.js.map`：Browser source map
 
 运行 `npm test` 会先重新构建，再检查旧 profile peer 下的 Host 加载、真实 Session seed
-验证、分支继承边界、`ignorable` 标记、历史冷读及 retry 输入保留；测试不调用模型、不写用户历史。
+验证、分支继承边界、`ignorable` 标记、V4 迁移事件名、历史冷读及 retry 输入保留；测试不调用模型、不写用户历史。
 
-测试也支持通过 `DSH_TEST_SESSION_MODULE` 指定沙盒中已构建的 `dsh-session` 模块绝对 file URL，再运行 `node --test tests/compatibility.test.mjs`。这样同一套测试可使用目标版本的真实 Session 校验器；Agent 和持久化适配器仍是测试替身，不能代替沙盒进程测试。
+测试也支持通过 `DSH_TEST_SESSION_MODULE` 指定沙盒中已构建的 `dsh-session` 模块绝对 file URL，再运行 `node --test tests/compatibility.test.mjs`。同时设置 `DSH_TEST_JSONL_MODULE` 与 `DSH_TEST_CORDIS_MODULE` 时，还会使用目标沙盒的真实 JSONL backend 验证 V4 原生写入和 V3→V4 惰性迁移；未设置时该项自动跳过。Agent 执行仍使用测试替身，不调用模型或用户 profile。
 
 ## 安装
 

@@ -1,7 +1,8 @@
 /** Host half of Message Edit: turn-atomic forks and structurally reversible versions. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentOptions, AgentSetup } from '@deepseek-ai/dsh-agent'
-import type {} from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-agent-preset-registry'
+import type { ModelSelection } from '@deepseek-ai/dsh-api-session-controller/types'
 import type {
   SessionId,
   Session,
@@ -163,7 +164,7 @@ function userText(message: UserMessage): string {
     .join('\n')
 }
 
-function cloneUser(message: UserMessage, content: ContentBlock[] = structuredClone(message.content)): UserMessage {
+function cloneUser(message: UserMessage, content: readonly ContentBlock[] = structuredClone(message.content)): UserMessage {
   return Object.freeze({
     id: crypto.randomUUID(),
     role: 'user' as const,
@@ -391,18 +392,83 @@ function planOperation(operation: MessageEditOperation, events: readonly Session
   }
 }
 
-function agentOptions(events: readonly SessionEvent[], fallback?: AgentOptions): AgentOptions {
-  const config = events.findLast(event => event.type === 'request/header')?.data.header.config
+function sameModelSelection(left: ModelSelection | undefined, right: ModelSelection): boolean {
+  return left?.provider === right.provider
+    && left.model === right.model
+    && left.reasoningEffort === right.reasoningEffort
+}
+
+/** Mirror API Session's durable model-selection projection so a branch can
+ * carry the composer's next-request choice even when its target cut predates
+ * the corresponding model/selection event. */
+function projectedModelSelection(events: readonly SessionEvent[]): {
+  lastUsed?: ModelSelection
+  pending?: ModelSelection
+} {
+  let lastUsed: ModelSelection | undefined
+  let pending: ModelSelection | undefined
+  for (const event of events) {
+    if (event.type === 'model/selection') {
+      pending = event.data
+      continue
+    }
+    if (event.type !== 'request/header') continue
+    const config = event.data.header.config
+    lastUsed = {
+      provider: config.provider,
+      model: config.model,
+      ...config.reasoningEffort === undefined
+        ? {}
+        : { reasoningEffort: String(config.reasoningEffort) },
+    }
+    if (sameModelSelection(pending, lastUsed)) pending = undefined
+  }
+  return {
+    ...lastUsed === undefined ? {} : { lastUsed },
+    ...pending === undefined ? {} : { pending },
+  }
+}
+
+function selectedModel(events: readonly SessionEvent[], fallback?: AgentOptions): ModelSelection {
+  const projected = projectedModelSelection(events)
+  const selected = projected.pending ?? projected.lastUsed
+  if (selected !== undefined) return selected
   const assistant = events.findLast(event => event.type === 'assistant/message')?.data.message.source
-  const provider = config?.provider ?? fallback?.provider ?? assistant?.provider
-  const model = config?.model ?? fallback?.model ?? assistant?.model
+  const provider = fallback?.provider ?? assistant?.provider
+  const model = fallback?.model ?? assistant?.model
   if (provider === undefined || provider.length === 0 || model === undefined || model.length === 0) {
     throw new Error('无法从会话历史解析模型路由。')
   }
-  const maxTokens = config?.maxTokens ?? fallback?.maxTokens
   return {
     provider,
     model,
+    ...fallback?.reasoningEffort === undefined
+      ? {}
+      : { reasoningEffort: fallback.reasoningEffort },
+  }
+}
+
+function agentOptions(
+  events: readonly SessionEvent[],
+  fallback?: AgentOptions,
+  selection = selectedModel(events, fallback),
+): AgentOptions {
+  const config = events.findLast(event => event.type === 'request/header')?.data.header.config
+  const {
+    provider: _provider,
+    model: _model,
+    reasoningEffort: _reasoningEffort,
+    maxTokens: _maxTokens,
+    ...extensions
+  } = fallback ?? {}
+  const maxTokens = config?.maxTokens ?? fallback?.maxTokens
+  return {
+    ...extensions,
+    provider: selection.provider,
+    model: selection.model,
+    ...selection.reasoningEffort === undefined
+      ? {}
+      : { reasoningEffort: selection.reasoningEffort as NonNullable<AgentOptions['reasoningEffort']> },
     ...maxTokens === undefined ? {} : { maxTokens },
   }
 }
@@ -520,7 +586,13 @@ function appendManualTurn(events: SessionEvent[], manual: ManualAssistantTurn, e
   appendLogSeedEvent(events, 'turn/end', { turn, reason: { kind: 'completed' } })
 }
 
-function versionSeed(source: Session, plan: OperationPlan): {
+function appendSelectedModel(events: SessionEvent[], selection: ModelSelection): void {
+  const projected = projectedModelSelection(events)
+  if (sameModelSelection(projected.pending ?? projected.lastUsed, selection)) return
+  appendLogSeedEvent(events, 'model/selection', selection)
+}
+
+function versionSeed(source: Session, plan: OperationPlan, selection: ModelSelection): {
   events: SessionEvent[]
   inheritedLength: SessionLogOffset
 } {
@@ -530,6 +602,7 @@ function versionSeed(source: Session, plan: OperationPlan): {
   const inheritedLength = events.length as SessionLogOffset
   appendInheritedInboxReset(events)
   appendLogSeedEvent(events, 'message-edit/version', plan.version)
+  appendSelectedModel(events, selection)
   if (plan.manualTurn !== undefined) appendManualTurn(events, plan.manualTurn, source.header.version >= 2)
   return { events, inheritedLength }
 }
@@ -549,6 +622,7 @@ async function createVersionAgent(
   childId: SessionId,
   plan: OperationPlan,
   options: AgentOptions,
+  selection: ModelSelection,
 ): Promise<AgentHandle> {
   const presets = ctx.get('agentPresets')
   const presetId = sessionPreset(source)
@@ -560,9 +634,9 @@ async function createVersionAgent(
     setup = async (agentCtx) => { await presets.mount(agentCtx, resolved) }
   }
   if (source.header.version >= 2) {
-    return createStoredVersionAgent(ctx, source, childId, plan, options, agentPreset, setup)
+    return createStoredVersionAgent(ctx, source, childId, plan, options, selection, agentPreset, setup)
   }
-  const seed = versionSeed(source, plan)
+  const seed = versionSeed(source, plan, selection)
   const seeded = seed.inheritedLength > 0
   const child = await ctx.agents.create({
     sessionId: childId,
@@ -597,6 +671,7 @@ async function createStoredVersionAgent(
   childId: SessionId,
   plan: OperationPlan,
   options: AgentOptions,
+  selection: ModelSelection,
   agentPreset: string | undefined,
   setup: AgentSetup | undefined,
 ): Promise<AgentHandle> {
@@ -620,6 +695,7 @@ async function createStoredVersionAgent(
   const events = [...detached.snapshotEvents()]
   appendInheritedInboxReset(events)
   appendLogSeedEvent(events, 'message-edit/version', plan.version)
+  appendSelectedModel(events, selection)
   if (plan.manualTurn !== undefined) appendManualTurn(events, plan.manualTurn, true)
   // Full validation precedes any persistent publication; originals remain untouched.
   restoreDetachedSession(
@@ -676,8 +752,9 @@ async function runOperation(ctx: Context, operation: MessageEditOperation): Prom
     try {
       const events = source.session.snapshotEvents()
       const plan = planOperation(operation, events)
-      const options = agentOptions(events, source.options)
-      const child = await createVersionAgent(ctx, source.session, childId, plan, options)
+      const selection = selectedModel(events, source.options)
+      const options = agentOptions(events, source.options, selection)
+      const child = await createVersionAgent(ctx, source.session, childId, plan, options, selection)
       inverses.push(() => child.dispose())
 
       const workspace = sourceWorkspace(ctx, sourceId)
@@ -704,14 +781,17 @@ function ownVersionEvent(
   record: SessionRecord,
   log: InheritedLog,
 ): VersionProjection | undefined {
-  const ownEvents = log.events.filter((event): event is SessionEvent<'message-edit/version'> => (
-    event.type === 'message-edit/version' && event.seq >= log.inherited
+  // V3→V4 deliberately namespaces unknown ignorable event identities. Accept
+  // the original spelling plus any migration-added `plugin:` wrappers so old
+  // branch provenance remains visible after DSH publishes its V4 successor.
+  const ownEvents = log.events.filter(event => (
+    isMessageEditVersionEventType(event.type) && event.seq >= log.inherited
   ))
   if (ownEvents.length === 0) return undefined
   if (ownEvents.length > 1) {
     throw new Error(`会话 ${record.header.id} 包含多个自身版本效果。`)
   }
-  const event = ownEvents[0]
+  const event = ownEvents[0] as SessionEvent<'message-edit/version'> | undefined
   if (event === undefined) return undefined
   const parent = record.header.parentSession
   if ('schemaVersion' in event.data) {
@@ -781,6 +861,12 @@ type SessionMessageProjectionCompat = unknown
 
 interface SessionStoreProjectionCompat {
   readonly messageProjections?: readonly SessionMessageProjectionCompat[]
+}
+
+function isMessageEditVersionEventType(type: string): boolean {
+  let identity = type
+  while (identity.startsWith('plugin:')) identity = identity.slice('plugin:'.length)
+  return identity === 'message-edit/version'
 }
 
 interface SessionCreateCompat {

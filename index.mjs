@@ -231,16 +231,57 @@ function planOperation(operation, events) {
 		case "retry": return retryPlan(operation.sessionId, operation.turn, operation.cascade, turns);
 	}
 }
-function agentOptions(events, fallback) {
-	const config = events.findLast((event) => event.type === "request/header")?.data.header.config;
+function sameModelSelection(left, right) {
+	return left?.provider === right.provider && left.model === right.model && left.reasoningEffort === right.reasoningEffort;
+}
+/** Mirror API Session's durable model-selection projection so a branch can
+* carry the composer's next-request choice even when its target cut predates
+* the corresponding model/selection event. */
+function projectedModelSelection(events) {
+	let lastUsed;
+	let pending;
+	for (const event of events) {
+		if (event.type === "model/selection") {
+			pending = event.data;
+			continue;
+		}
+		if (event.type !== "request/header") continue;
+		const config = event.data.header.config;
+		lastUsed = {
+			provider: config.provider,
+			model: config.model,
+			...config.reasoningEffort === void 0 ? {} : { reasoningEffort: String(config.reasoningEffort) }
+		};
+		if (sameModelSelection(pending, lastUsed)) pending = void 0;
+	}
+	return {
+		...lastUsed === void 0 ? {} : { lastUsed },
+		...pending === void 0 ? {} : { pending }
+	};
+}
+function selectedModel(events, fallback) {
+	const projected = projectedModelSelection(events);
+	const selected = projected.pending ?? projected.lastUsed;
+	if (selected !== void 0) return selected;
 	const assistant = events.findLast((event) => event.type === "assistant/message")?.data.message.source;
-	const provider = config?.provider ?? fallback?.provider ?? assistant?.provider;
-	const model = config?.model ?? fallback?.model ?? assistant?.model;
+	const provider = fallback?.provider ?? assistant?.provider;
+	const model = fallback?.model ?? assistant?.model;
 	if (provider === void 0 || provider.length === 0 || model === void 0 || model.length === 0) throw new Error("无法从会话历史解析模型路由。");
-	const maxTokens = config?.maxTokens ?? fallback?.maxTokens;
 	return {
 		provider,
 		model,
+		...fallback?.reasoningEffort === void 0 ? {} : { reasoningEffort: fallback.reasoningEffort }
+	};
+}
+function agentOptions(events, fallback, selection = selectedModel(events, fallback)) {
+	const config = events.findLast((event) => event.type === "request/header")?.data.header.config;
+	const { provider: _provider, model: _model, reasoningEffort: _reasoningEffort, maxTokens: _maxTokens, ...extensions } = fallback ?? {};
+	const maxTokens = config?.maxTokens ?? fallback?.maxTokens;
+	return {
+		...extensions,
+		provider: selection.provider,
+		model: selection.model,
+		...selection.reasoningEffort === void 0 ? {} : { reasoningEffort: selection.reasoningEffort },
 		...maxTokens === void 0 ? {} : { maxTokens }
 	};
 }
@@ -340,11 +381,17 @@ function appendManualTurn(events, manual, embeddedStream) {
 		reason: { kind: "completed" }
 	});
 }
-function versionSeed(source, plan) {
+function appendSelectedModel(events, selection) {
+	const projected = projectedModelSelection(events);
+	if (sameModelSelection(projected.pending ?? projected.lastUsed, selection)) return;
+	appendLogSeedEvent(events, "model/selection", selection);
+}
+function versionSeed(source, plan, selection) {
 	const events = inheritedSeed(source, plan.boundary);
 	const inheritedLength = events.length;
 	appendInheritedInboxReset(events);
 	appendLogSeedEvent(events, "message-edit/version", plan.version);
+	appendSelectedModel(events, selection);
 	if (plan.manualTurn !== void 0) appendManualTurn(events, plan.manualTurn, source.header.version >= 2);
 	return {
 		events,
@@ -359,7 +406,7 @@ function sessionPreset(session) {
 	}
 	return session.header.agentPreset;
 }
-async function createVersionAgent(ctx, source, childId, plan, options) {
+async function createVersionAgent(ctx, source, childId, plan, options, selection) {
 	const presets = ctx.get("agentPresets");
 	const presetId = sessionPreset(source);
 	let agentPreset;
@@ -371,8 +418,8 @@ async function createVersionAgent(ctx, source, childId, plan, options) {
 			await presets.mount(agentCtx, resolved);
 		};
 	}
-	if (source.header.version >= 2) return createStoredVersionAgent(ctx, source, childId, plan, options, agentPreset, setup);
-	const seed = versionSeed(source, plan);
+	if (source.header.version >= 2) return createStoredVersionAgent(ctx, source, childId, plan, options, selection, agentPreset, setup);
+	const seed = versionSeed(source, plan, selection);
 	const seeded = seed.inheritedLength > 0;
 	const child = await ctx.agents.create({
 		sessionId: childId,
@@ -400,7 +447,7 @@ async function createVersionAgent(ctx, source, childId, plan, options) {
 * persistence/restore boundary. This preserves both the inherited cut and the
 * ignorable extension envelope, which Session.append cannot currently express.
 */
-async function createStoredVersionAgent(ctx, source, childId, plan, options, agentPreset, setup) {
+async function createStoredVersionAgent(ctx, source, childId, plan, options, selection, agentPreset, setup) {
 	const persistence = ctx.get("sessionPersistence");
 	if (persistence?.create === void 0) throw new Error("当前持久化服务不支持创建版本。");
 	const prefix = inheritedSeed(source, plan.boundary);
@@ -420,6 +467,7 @@ async function createStoredVersionAgent(ctx, source, childId, plan, options, age
 	const events = [...detached.snapshotEvents()];
 	appendInheritedInboxReset(events);
 	appendLogSeedEvent(events, "message-edit/version", plan.version);
+	appendSelectedModel(events, selection);
 	if (plan.manualTurn !== void 0) appendManualTurn(events, plan.manualTurn, true);
 	restoreDetachedSession(SessionClass, childId, structuredClone(events), detached.header, inherited, projections);
 	const handle = await persistence.create(detached.header, { inheritedEventCount: inherited });
@@ -459,8 +507,9 @@ async function runOperation(ctx, operation) {
 		try {
 			const events = source.session.snapshotEvents();
 			const plan = planOperation(operation, events);
-			const options = agentOptions(events, source.options);
-			const child = await createVersionAgent(ctx, source.session, childId, plan, options);
+			const selection = selectedModel(events, source.options);
+			const options = agentOptions(events, source.options, selection);
+			const child = await createVersionAgent(ctx, source.session, childId, plan, options, selection);
 			inverses.push(() => child.dispose());
 			const workspace = sourceWorkspace(ctx, sourceId);
 			if (workspace !== void 0) {
@@ -484,7 +533,7 @@ async function runOperation(ctx, operation) {
 	});
 }
 function ownVersionEvent(record, log) {
-	const ownEvents = log.events.filter((event) => event.type === "message-edit/version" && event.seq >= log.inherited);
+	const ownEvents = log.events.filter((event) => isMessageEditVersionEventType(event.type) && event.seq >= log.inherited);
 	if (ownEvents.length === 0) return void 0;
 	if (ownEvents.length > 1) throw new Error(`会话 ${record.header.id} 包含多个自身版本效果。`);
 	const event = ownEvents[0];
@@ -535,6 +584,11 @@ function flattenLineage(root, descendants) {
 	};
 	visit(descendants, 1);
 	return result;
+}
+function isMessageEditVersionEventType(type) {
+	let identity = type;
+	while (identity.startsWith("plugin:")) identity = identity.slice(7);
+	return identity === "message-edit/version";
 }
 /** Borrow the active profile's projection catalog when available. Detached
 * replay must receive the same interpreters as live SessionStore operations. */

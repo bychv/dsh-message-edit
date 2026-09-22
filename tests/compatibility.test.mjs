@@ -7,6 +7,12 @@ import { pathToFileURL } from 'node:url'
 import { test } from 'node:test'
 // An explicit module URL lets the same tests exercise a sandbox's built core.
 const { Session } = await import(process.env.DSH_TEST_SESSION_MODULE ?? '@deepseek-ai/dsh-session')
+const JsonlSessionPersistence = process.env.DSH_TEST_JSONL_MODULE === undefined
+  ? undefined
+  : (await import(process.env.DSH_TEST_JSONL_MODULE)).default
+const SandboxContext = process.env.DSH_TEST_CORDIS_MODULE === undefined
+  ? undefined
+  : (await import(process.env.DSH_TEST_CORDIS_MODULE)).Context
 import { apply } from '../index.mjs'
 
 function restoreSession(id, events, header, inheritedEventCount, projections) {
@@ -66,17 +72,29 @@ function appendTurn(session, turn, durableInbox = false) {
 // Exercise the public HTTP route and the selected real Session validator/fold.
 // Agent execution and persistence I/O are deterministic adapters: no model calls
 // or user profile/history writes are needed for these regression tests.
-function harness({ durableInbox = false, messageProjection } = {}) {
+function harness({
+  durableInbox = false,
+  messageProjection,
+  requestConfig,
+  composerSelection,
+  sourceAgentOptions = { provider: 'fixture', model: 'fixture' },
+} = {}) {
   const projections = messageProjection === undefined ? undefined : [messageProjection]
   const source = Session.create('session-fixture-root', undefined, undefined, undefined, projections)
+  if (requestConfig !== undefined) {
+    source.append('request/header', { header: { config: requestConfig }, reason: 'initial' })
+  }
   const first = appendTurn(source, 1, durableInbox)
   if (messageProjection !== undefined) {
     source.append('image/offload', { targets: [] })
   }
   const second = appendTurn(source, 2, durableInbox)
+  if (composerSelection !== undefined) source.append('model/selection', composerSelection)
   const live = new Map([[source.id, source]])
+  const liveOptions = new Map([[source.id, sourceAgentOptions]])
   const disk = new Map()
   const creates = []
+  const resumes = []
   const queued = []
   let readHandles = 0
   let writeHandles = 0
@@ -96,7 +114,7 @@ function harness({ durableInbox = false, messageProjection } = {}) {
     .map(childId => ({ session: record(childId), descendants: children(childId) }))
   const agent = (session) => ({
     session,
-    options: { provider: 'fixture', model: 'fixture' },
+    options: liveOptions.get(session.id) ?? sourceAgentOptions,
     runMaintenance: callback => callback(),
     followup: message => queued.push(message),
   })
@@ -118,9 +136,12 @@ function harness({ durableInbox = false, messageProjection } = {}) {
           isSeeded: false, ...options.meta,
         }, options.inheritedEventCount, projections)
         live.set(session.id, session)
+        liveOptions.set(session.id, options.agentOptions ?? sourceAgentOptions)
         return { agent: agent(session), dispose: async () => live.delete(session.id) }
       },
-      resume: async ({ resumeSessionId }) => {
+      resume: async (options) => {
+        resumes.push(options)
+        const { resumeSessionId } = options
         const stored = read(resumeSessionId)
         const session = restoreSession(
           resumeSessionId,
@@ -130,6 +151,7 @@ function harness({ durableInbox = false, messageProjection } = {}) {
           projections,
         )
         live.set(session.id, session)
+        liveOptions.set(session.id, options.agentOptions ?? sourceAgentOptions)
         return { agent: agent(session), dispose: async () => live.delete(session.id) }
       },
     },
@@ -181,7 +203,8 @@ function harness({ durableInbox = false, messageProjection } = {}) {
   }
   apply(ctx)
   return {
-    source, first, second, creates, queued, live, read, persist,
+    source, first, second, creates, resumes, queued, live, read, persist,
+    store: (id, value) => disk.set(id, JSON.stringify(value)),
     assertHandlesClosed: () => { assert.equal(readHandles, 0); assert.equal(writeHandles, 0) },
     async request(method, body) {
       const request = Readable.from(method === 'POST' ? [JSON.stringify(body)] : [])
@@ -320,6 +343,49 @@ test('retry clears the inherited durable prompt before queueing its replacement'
   h.assertHandlesClosed()
 })
 
+for (const fixture of [
+  {
+    name: 'edit',
+    selection: { provider: 'composer', model: 'composer-edit', reasoningEffort: 'high' },
+    operation: h => ({
+      action: 'edit', sessionId: h.source.id, eventSeq: h.second.seq,
+      blockIndex: 0, text: 'composer-routed edit', cascade: 'truncate',
+    }),
+  },
+  {
+    name: 'retry',
+    selection: { provider: 'composer', model: 'composer-retry' },
+    operation: h => ({
+      action: 'retry', sessionId: h.source.id, turn: 2, cascade: 'truncate',
+    }),
+  },
+]) {
+  test(`${fixture.name} carries the lower composer model selection into the new branch`, async () => {
+    const h = harness({
+      requestConfig: {
+        provider: 'history', model: 'history-model', reasoningEffort: 'low', maxTokens: 2048,
+      },
+      composerSelection: fixture.selection,
+      sourceAgentOptions: {
+        provider: 'startup', model: 'startup-model', reasoningEffort: 'medium', maxTokens: 1024,
+      },
+    })
+    const result = await h.request('POST', fixture.operation(h))
+    const stored = h.read(result.sessionId)
+    assert.deepEqual(
+      stored.events.findLast(event => event.type === 'model/selection')?.data,
+      fixture.selection,
+    )
+
+    const resumed = h.resumes.findLast(options => options.resumeSessionId === result.sessionId)
+    assert.equal(resumed.agentOptions.provider, fixture.selection.provider)
+    assert.equal(resumed.agentOptions.model, fixture.selection.model)
+    assert.equal(resumed.agentOptions.maxTokens, 2048)
+    assert.equal(resumed.agentOptions.reasoningEffort, fixture.selection.reasoningEffort)
+    h.assertHandlesClosed()
+  })
+}
+
 test('an edited branch can be resumed and edited again after all live agents are removed', async () => {
   const h = harness()
   const first = await h.request('POST', {
@@ -338,4 +404,114 @@ test('an edited branch can be resumed and edited again after all live agents are
   assert.equal(restored.messages.at(-1).text, 'after restart')
   assert.deepEqual(restored.undoStack, [first.sessionId, h.source.id])
   h.assertHandlesClosed()
+})
+
+test('V3-to-V4 namespaced version metadata remains navigable and branchable', async () => {
+  const h = harness()
+  const first = await h.request('POST', {
+    action: 'edit', sessionId: h.source.id, eventSeq: h.second.seq,
+    blockIndex: 0, text: 'migrated branch', cascade: 'truncate',
+  })
+  const migrated = h.read(first.sessionId)
+  const version = migrated.events.find(event => event.type === 'message-edit/version')
+  assert.ok(version)
+  version.type = 'plugin:message-edit/version'
+  h.store(first.sessionId, migrated)
+  h.live.clear()
+
+  const history = await h.request('GET', { sessionId: first.sessionId })
+  assert.deepEqual(history.undoStack, [h.source.id])
+  assert.equal(history.versions.find(row => row.sessionId === first.sessionId)?.operation, 'edit')
+
+  const target = history.messages.at(-1)
+  const second = await h.request('POST', {
+    action: 'edit', sessionId: first.sessionId, eventSeq: target.eventSeq,
+    blockIndex: target.blockIndex, text: 'post-migration branch', cascade: 'truncate',
+  })
+  h.live.clear()
+  const restored = await h.request('GET', { sessionId: second.sessionId })
+  assert.equal(restored.messages.at(-1).text, 'post-migration branch')
+  assert.deepEqual(restored.undoStack, [first.sessionId, h.source.id])
+  h.assertHandlesClosed()
+})
+
+test('alpha JSONL validates new V4 branches and migrates V3 provenance losslessly', {
+  skip: JsonlSessionPersistence === undefined || SandboxContext === undefined,
+}, async () => {
+  const h = harness()
+  const result = await h.request('POST', {
+    action: 'edit', sessionId: h.source.id, eventSeq: h.second.seq,
+    blockIndex: 0, text: 'persistence migration', cascade: 'truncate',
+  })
+  const stored = h.read(result.sessionId)
+  const currentRoot = await mkdtemp(join(tmpdir(), 'dsh-message-edit-v4-current-'))
+  const migrationRoot = await mkdtemp(join(tmpdir(), 'dsh-message-edit-v4-migration-'))
+  const contexts = []
+  try {
+    const current = new SandboxContext()
+    contexts.push(current)
+    await current.plugin(JsonlSessionPersistence, { root: currentRoot, compression: 'none' })
+    const writer = await current.sessionPersistence.create(stored.header, {
+      inheritedEventCount: stored.inheritedEventCount,
+    })
+    try {
+      await writer.append(stored.events)
+      await writer.flush()
+    } finally {
+      await writer.close()
+    }
+    const currentReader = await current.sessionPersistence.open(result.sessionId, 'read')
+    try {
+      const read = await currentReader.read()
+      assert.equal(currentReader.header.version, 4)
+      assert.equal(read.events.find(event => event.type === 'message-edit/version')?.ignorable, true)
+    } finally {
+      await currentReader.close()
+    }
+
+    const v3Path = join(migrationRoot, '_no-cwd', result.sessionId, 'session.v3.jsonl')
+    await mkdir(join(migrationRoot, '_no-cwd', result.sessionId), { recursive: true })
+    const physicalHeader = {
+      type: 'session',
+      ...stored.header,
+      version: 3,
+      delegationDepth: stored.header.delegationDepth ?? 0,
+    }
+    await writeFile(v3Path, [physicalHeader, ...stored.events]
+      .map(row => JSON.stringify(row))
+      .join('\n') + '\n')
+
+    const migrated = new SandboxContext()
+    contexts.push(migrated)
+    await migrated.plugin(JsonlSessionPersistence, { root: migrationRoot, compression: 'none' })
+    const prepared = await migrated.sessionPersistence.open(result.sessionId, 'read')
+    let migratedEvents
+    try {
+      migratedEvents = (await prepared.read()).events
+      assert.equal(prepared.header.version, 4)
+      assert.equal(migratedEvents.find(event => event.type === 'plugin:message-edit/version')?.ignorable, true)
+    } finally {
+      await prepared.close()
+    }
+    await assert.rejects(readFile(join(migrationRoot, '_no-cwd', result.sessionId, 'session.v4.jsonl')))
+
+    const publisher = await migrated.sessionPersistence.open(result.sessionId, 'write')
+    await publisher.close()
+    const published = await readFile(join(migrationRoot, '_no-cwd', result.sessionId, 'session.v4.jsonl'), 'utf8')
+    assert.match(published, /"type":"plugin:message-edit\/version"/)
+
+    const migratedStored = {
+      header: { ...stored.header, version: 4 },
+      events: migratedEvents,
+      inheritedEventCount: stored.inheritedEventCount,
+    }
+    h.store(result.sessionId, migratedStored)
+    h.live.clear()
+    const history = await h.request('GET', { sessionId: result.sessionId })
+    assert.deepEqual(history.undoStack, [h.source.id])
+  } finally {
+    for (const ctx of contexts.reverse()) await ctx.fiber.dispose()
+    await rm(currentRoot, { recursive: true, force: true })
+    await rm(migrationRoot, { recursive: true, force: true })
+  }
 })
