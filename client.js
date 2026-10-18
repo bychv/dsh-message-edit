@@ -155,6 +155,7 @@ window.__ModuleLoader__.load({
 			generation = 0;
 			ctx;
 			sessions;
+			uiWorkspace;
 			sessionSource;
 			sessionSourceDispose;
 			sessionRevision;
@@ -173,6 +174,7 @@ window.__ModuleLoader__.load({
 				this.sessionId = sessionId;
 				this.ctx = ctx;
 				this.sessions = ctx.get("sessions");
+				this.uiWorkspace = ctx.get("uiWorkspace");
 				this.face = {
 					hooks: { messageEdit: this.store },
 					acquire: () => {
@@ -377,7 +379,7 @@ window.__ModuleLoader__.load({
 			/** Session-list publication is the reactive dependency for navigation. */
 			openWhenListed(sessionId) {
 				if (this.sessions.list.getSnapshot().byId[sessionId] !== void 0) {
-					this.sessions.open(sessionId);
+					this.uiWorkspace.openSession(sessionId);
 					return Promise.resolve();
 				}
 				return new Promise((resolve) => {
@@ -388,7 +390,7 @@ window.__ModuleLoader__.load({
 						settled = true;
 						dispose();
 						this.navigationWaits.delete(cancel);
-						if (open) this.sessions.open(sessionId);
+						if (open) this.uiWorkspace.openSession(sessionId);
 						resolve();
 					};
 					const cancel = () => {
@@ -415,15 +417,15 @@ window.__ModuleLoader__.load({
 			document.head.appendChild(tag);
 		}
 		var InlineMessageEdit_module_css_default = {
-			"footer": "LRkRdW_footer",
-			"panel": "LRkRdW_panel",
-			"pickerItemActive": "LRkRdW_pickerItemActive",
-			"input": "LRkRdW_input",
-			"title": "LRkRdW_title",
-			"overlay": "LRkRdW_overlay",
-			"pickerItem": "LRkRdW_pickerItem",
 			"picker": "LRkRdW_picker",
-			"iconButton": "LRkRdW_iconButton"
+			"footer": "LRkRdW_footer",
+			"iconButton": "LRkRdW_iconButton",
+			"overlay": "LRkRdW_overlay",
+			"input": "LRkRdW_input",
+			"panel": "LRkRdW_panel",
+			"title": "LRkRdW_title",
+			"pickerItem": "LRkRdW_pickerItem",
+			"pickerItemActive": "LRkRdW_pickerItemActive"
 		};
 		//#endregion
 		//#region src/client/InlineMessageEdit.tsx
@@ -716,9 +718,9 @@ window.__ModuleLoader__.load({
 			document.head.appendChild(tag);
 		}
 		var MessageEditHeader_module_css_default = {
+			"rerollButton": "kmIVpW_rerollButton",
 			"root": "kmIVpW_root",
 			"counter": "kmIVpW_counter",
-			"rerollButton": "kmIVpW_rerollButton",
 			"iconButton": "kmIVpW_iconButton"
 		};
 		//#endregion
@@ -794,55 +796,55 @@ window.__ModuleLoader__.load({
 			document.head.appendChild(tag);
 		}
 		var MessageEditTimelineView_module_css_default = {
-			"notice": "pdbLWq_notice",
-			"versionDiff": "pdbLWq_versionDiff",
-			"turnSection": "pdbLWq_turnSection",
-			"sectionHeading": "pdbLWq_sectionHeading",
-			"status": "pdbLWq_status",
-			"cascadeField": "pdbLWq_cascadeField",
-			"secondaryButton": "pdbLWq_secondaryButton",
-			"turnList": "pdbLWq_turnList",
-			"messageList": "pdbLWq_messageList",
+			"versionList": "pdbLWq_versionList",
 			"messageHeader": "pdbLWq_messageHeader",
-			"turnsPanel": "pdbLWq_turnsPanel",
+			"primaryButton": "pdbLWq_primaryButton",
 			"editorHint": "pdbLWq_editorHint",
-			"versionsPanel": "pdbLWq_versionsPanel",
-			"editor": "pdbLWq_editor",
-			"kindBadge": "pdbLWq_kindBadge",
-			"effectControls": "pdbLWq_effectControls",
-			"effectDepth": "pdbLWq_effectDepth",
-			"versionButton": "pdbLWq_versionButton",
-			"columns": "pdbLWq_columns",
-			"versionLine": "pdbLWq_versionLine",
-			"versionTitle": "pdbLWq_versionTitle",
-			"messageCard": "pdbLWq_messageCard",
-			"effectButtons": "pdbLWq_effectButtons",
-			"intro": "pdbLWq_intro",
-			"count": "pdbLWq_count",
+			"messageList": "pdbLWq_messageList",
+			"messageText": "pdbLWq_messageText",
+			"sectionHeading": "pdbLWq_sectionHeading",
 			"textarea": "pdbLWq_textarea",
+			"empty": "pdbLWq_empty",
+			"columns": "pdbLWq_columns",
+			"pathBadge": "pdbLWq_pathBadge",
+			"versionTitle": "pdbLWq_versionTitle",
+			"turnSection": "pdbLWq_turnSection",
+			"effectDepth": "pdbLWq_effectDepth",
+			"notice": "pdbLWq_notice",
+			"versionsPanel": "pdbLWq_versionsPanel",
+			"error": "pdbLWq_error",
+			"turnsPanel": "pdbLWq_turnsPanel",
+			"versionItem": "pdbLWq_versionItem",
+			"effectControls": "pdbLWq_effectControls",
+			"versionMeta": "pdbLWq_versionMeta",
+			"headerActions": "pdbLWq_headerActions",
 			"subtitle": "pdbLWq_subtitle",
+			"versionDiff": "pdbLWq_versionDiff",
+			"pageHeader": "pdbLWq_pageHeader",
+			"turnHeader": "pdbLWq_turnHeader",
+			"effectButtons": "pdbLWq_effectButtons",
+			"versionMain": "pdbLWq_versionMain",
+			"count": "pdbLWq_count",
+			"editorActions": "pdbLWq_editorActions",
+			"select": "pdbLWq_select",
+			"messageCard": "pdbLWq_messageCard",
+			"intro": "pdbLWq_intro",
+			"turnTitle": "pdbLWq_turnTitle",
+			"messageTime": "pdbLWq_messageTime",
+			"editor": "pdbLWq_editor",
 			"title": "pdbLWq_title",
 			"turnPreview": "pdbLWq_turnPreview",
-			"pageHeader": "pdbLWq_pageHeader",
-			"pathBadge": "pdbLWq_pathBadge",
-			"versionMain": "pdbLWq_versionMain",
-			"turnHeader": "pdbLWq_turnHeader",
-			"editorActions": "pdbLWq_editorActions",
-			"messageTime": "pdbLWq_messageTime",
-			"select": "pdbLWq_select",
-			"versionList": "pdbLWq_versionList",
+			"secondaryButton": "pdbLWq_secondaryButton",
 			"versionDot": "pdbLWq_versionDot",
-			"turnTitle": "pdbLWq_turnTitle",
-			"versionMeta": "pdbLWq_versionMeta",
-			"error": "pdbLWq_error",
-			"empty": "pdbLWq_empty",
-			"headerActions": "pdbLWq_headerActions",
-			"primaryButton": "pdbLWq_primaryButton",
-			"root": "pdbLWq_root",
-			"messageText": "pdbLWq_messageText",
+			"cascadeField": "pdbLWq_cascadeField",
+			"kindBadge": "pdbLWq_kindBadge",
 			"textButton": "pdbLWq_textButton",
-			"versionItem": "pdbLWq_versionItem",
-			"currentBadge": "pdbLWq_currentBadge"
+			"versionButton": "pdbLWq_versionButton",
+			"status": "pdbLWq_status",
+			"turnList": "pdbLWq_turnList",
+			"currentBadge": "pdbLWq_currentBadge",
+			"versionLine": "pdbLWq_versionLine",
+			"root": "pdbLWq_root"
 		};
 		//#endregion
 		//#region src/client/MessageEditTimelineView.tsx
@@ -1206,7 +1208,8 @@ window.__ModuleLoader__.load({
 			"slots",
 			"conversation",
 			"connection",
-			"sessions"
+			"sessions",
+			"uiWorkspace"
 		];
 		/** Register both UI contributions over one per-session controller identity. */
 		function apply(ctx) {

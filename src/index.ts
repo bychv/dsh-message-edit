@@ -1,7 +1,8 @@
 /** Host half of Message Edit: turn-atomic forks and structurally reversible versions. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentOptions, AgentSetup } from '@deepseek-ai/dsh-agent'
-import type {} from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-agent-preset-registry'
+import type { ModelSelection } from '@deepseek-ai/dsh-api-session-controller/types'
 import type {
   SessionId,
   Session,
@@ -163,7 +164,7 @@ function userText(message: UserMessage): string {
     .join('\n')
 }
 
-function cloneUser(message: UserMessage, content: ContentBlock[] = structuredClone(message.content)): UserMessage {
+function cloneUser(message: UserMessage, content: readonly ContentBlock[] = structuredClone(message.content)): UserMessage {
   return Object.freeze({
     id: crypto.randomUUID(),
     role: 'user' as const,
@@ -391,17 +392,83 @@ function planOperation(operation: MessageEditOperation, events: readonly Session
   }
 }
 
-function agentOptions(events: readonly SessionEvent[], fallback?: AgentOptions): AgentOptions {
-  const config = events.findLast(event => event.type === 'request/header')?.data.header.config
-  const provider = config?.provider ?? fallback?.provider
-  const model = config?.model ?? fallback?.model
+function sameModelSelection(left: ModelSelection | undefined, right: ModelSelection): boolean {
+  return left?.provider === right.provider
+    && left.model === right.model
+    && left.reasoningEffort === right.reasoningEffort
+}
+
+/** Mirror API Session's durable model-selection projection so a branch can
+ * carry the composer's next-request choice even when its target cut predates
+ * the corresponding model/selection event. */
+function projectedModelSelection(events: readonly SessionEvent[]): {
+  lastUsed?: ModelSelection
+  pending?: ModelSelection
+} {
+  let lastUsed: ModelSelection | undefined
+  let pending: ModelSelection | undefined
+  for (const event of events) {
+    if (event.type === 'model/selection') {
+      pending = event.data
+      continue
+    }
+    if (event.type !== 'request/header') continue
+    const config = event.data.header.config
+    lastUsed = {
+      provider: config.provider,
+      model: config.model,
+      ...config.reasoningEffort === undefined
+        ? {}
+        : { reasoningEffort: String(config.reasoningEffort) },
+    }
+    if (sameModelSelection(pending, lastUsed)) pending = undefined
+  }
+  return {
+    ...lastUsed === undefined ? {} : { lastUsed },
+    ...pending === undefined ? {} : { pending },
+  }
+}
+
+function selectedModel(events: readonly SessionEvent[], fallback?: AgentOptions): ModelSelection {
+  const projected = projectedModelSelection(events)
+  const selected = projected.pending ?? projected.lastUsed
+  if (selected !== undefined) return selected
+  const assistant = events.findLast(event => event.type === 'assistant/message')?.data.message.source
+  const provider = fallback?.provider ?? assistant?.provider
+  const model = fallback?.model ?? assistant?.model
   if (provider === undefined || provider.length === 0 || model === undefined || model.length === 0) {
     throw new Error('无法从会话历史解析模型路由。')
   }
-  const maxTokens = config?.maxTokens ?? fallback?.maxTokens
   return {
     provider,
     model,
+    ...fallback?.reasoningEffort === undefined
+      ? {}
+      : { reasoningEffort: fallback.reasoningEffort },
+  }
+}
+
+function agentOptions(
+  events: readonly SessionEvent[],
+  fallback?: AgentOptions,
+  selection = selectedModel(events, fallback),
+): AgentOptions {
+  const config = events.findLast(event => event.type === 'request/header')?.data.header.config
+  const {
+    provider: _provider,
+    model: _model,
+    reasoningEffort: _reasoningEffort,
+    maxTokens: _maxTokens,
+    ...extensions
+  } = fallback ?? {}
+  const maxTokens = config?.maxTokens ?? fallback?.maxTokens
+  return {
+    ...extensions,
+    provider: selection.provider,
+    model: selection.model,
+    ...selection.reasoningEffort === undefined
+      ? {}
+      : { reasoningEffort: selection.reasoningEffort as NonNullable<AgentOptions['reasoningEffort']> },
     ...maxTokens === undefined ? {} : { maxTokens },
   }
 }
@@ -414,7 +481,7 @@ async function withSourceAgent<T>(
   let handle: AgentHandle | undefined
   let agent = ctx.agents.get(sessionId)
   if (agent === undefined) {
-    const snapshot = await ctx.sessionQuery.readSession(sessionId)
+    const snapshot = await readStoredLog(ctx, sessionId)
     handle = await ctx.agents.resume({
       resumeSessionId: sessionId,
       agentOptions: agentOptions(snapshot.events),
@@ -450,7 +517,7 @@ function appendLogSeedEvent<T extends Exclude<SessionEventType, SurfaceEventType
     time: Date.now(),
     data,
     ...(type.startsWith('message-edit/') ? { ignorable: true as const } : {}),
-  } as SessionEvent<T>)
+  } as unknown as SessionEvent<T>)
 }
 
 function appendSurfaceSeedEvent<T extends SurfaceEventType>(
@@ -466,23 +533,66 @@ function appendSurfaceSeedEvent<T extends SurfaceEventType>(
     data,
     surfaceOp: intent.surfaceOp,
     ...intent.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: intent.sourceEventSeqs },
-  } as SessionEvent<T>)
+  } as unknown as SessionEvent<T>)
 }
 
-function appendManualTurn(events: SessionEvent[], manual: ManualAssistantTurn): void {
+/** A user prompt is durably inserted before turn/start and claimed after it.
+ * Forking immediately before the turn therefore inherits the insertion but not
+ * its matching removal. Cancel that inherited inbox state before publishing the
+ * branch; the operation plan will enqueue exactly the intended replacement. */
+function appendInheritedInboxReset(events: SessionEvent[]): void {
+  const pending: Record<'next-turn' | 'next-step', UserMessage[]> = {
+    'next-turn': [],
+    'next-step': [],
+  }
+  for (const event of events) {
+    if (event.type !== 'agent/inbox/spliced') continue
+    const splice = event.data
+    pending[splice.target].splice(
+      splice.start,
+      splice.removedCount ?? 0,
+      ...splice.inserted,
+    )
+  }
+  for (const target of ['next-step', 'next-turn'] as const) {
+    const removedCount = pending[target].length
+    if (removedCount === 0) continue
+    appendLogSeedEvent(events, 'agent/inbox/spliced', {
+      target,
+      start: 0,
+      removedCount,
+      inserted: [],
+      outcome: 'canceled',
+    })
+  }
+}
+
+function appendManualTurn(events: SessionEvent[], manual: ManualAssistantTurn, embeddedStream: boolean): void {
   const { turn, user, assistant } = manual
   appendLogSeedEvent(events, 'turn/start', { turn })
   appendSurfaceSeedEvent(events, 'user/message', user, { surfaceOp: 'append' })
   appendLogSeedEvent(events, 'step/start', { turn, step: 1 })
-  appendSurfaceSeedEvent(events, 'assistant/message', { turn, step: 1, message: assistant }, {
+  // Format v2 embeds the stream in each assistant message and rejects external
+  // provenance. A manual edit has no model stream; do not reuse the old one.
+  const data = {
+    turn, step: 1, message: assistant,
+    ...embeddedStream ? { stream: [] } : {},
+  } as AssistantEvent['data'] // The owning Session format selects the schema.
+  appendSurfaceSeedEvent(events, 'assistant/message', data, {
     surfaceOp: 'append',
-    sourceEventSeqs: [],
+    ...embeddedStream ? {} : { sourceEventSeqs: [] },
   })
   appendLogSeedEvent(events, 'step/end', { turn, step: 1 })
   appendLogSeedEvent(events, 'turn/end', { turn, reason: { kind: 'completed' } })
 }
 
-function versionSeed(source: Session, plan: OperationPlan): {
+function appendSelectedModel(events: SessionEvent[], selection: ModelSelection): void {
+  const projected = projectedModelSelection(events)
+  if (sameModelSelection(projected.pending ?? projected.lastUsed, selection)) return
+  appendLogSeedEvent(events, 'model/selection', selection)
+}
+
+function versionSeed(source: Session, plan: OperationPlan, selection: ModelSelection): {
   events: SessionEvent[]
   inheritedLength: SessionLogOffset
 } {
@@ -490,8 +600,10 @@ function versionSeed(source: Session, plan: OperationPlan): {
   // Array length is already a non-negative safe integer. Keep the brand type-only:
   // profile-local DSH peers may lag behind the services supplied by the host CLI.
   const inheritedLength = events.length as SessionLogOffset
+  appendInheritedInboxReset(events)
   appendLogSeedEvent(events, 'message-edit/version', plan.version)
-  if (plan.manualTurn !== undefined) appendManualTurn(events, plan.manualTurn)
+  appendSelectedModel(events, selection)
+  if (plan.manualTurn !== undefined) appendManualTurn(events, plan.manualTurn, source.header.version >= 2)
   return { events, inheritedLength }
 }
 
@@ -510,8 +622,8 @@ async function createVersionAgent(
   childId: SessionId,
   plan: OperationPlan,
   options: AgentOptions,
+  selection: ModelSelection,
 ): Promise<AgentHandle> {
-  const seed = versionSeed(source, plan)
   const presets = ctx.get('agentPresets')
   const presetId = sessionPreset(source)
   let agentPreset: string | undefined
@@ -521,6 +633,10 @@ async function createVersionAgent(
     agentPreset = resolved
     setup = async (agentCtx) => { await presets.mount(agentCtx, resolved) }
   }
+  if (source.header.version >= 2) {
+    return createStoredVersionAgent(ctx, source, childId, plan, options, selection, agentPreset, setup)
+  }
+  const seed = versionSeed(source, plan, selection)
   const seeded = seed.inheritedLength > 0
   const child = await ctx.agents.create({
     sessionId: childId,
@@ -541,6 +657,72 @@ async function createVersionAgent(
   } catch (error: unknown) {
     await child.dispose()
     throw error
+  }
+}
+
+/** Format v2+ permits only inherited events in a fresh seeded constructor.
+ * Validate the complete branch off-store, then transfer it through the public
+ * persistence/restore boundary. This preserves both the inherited cut and the
+ * ignorable extension envelope, which Session.append cannot currently express.
+ */
+async function createStoredVersionAgent(
+  ctx: Context,
+  source: Session,
+  childId: SessionId,
+  plan: OperationPlan,
+  options: AgentOptions,
+  selection: ModelSelection,
+  agentPreset: string | undefined,
+  setup: AgentSetup | undefined,
+): Promise<AgentHandle> {
+  const persistence = ctx.get('sessionPersistence') as PersistenceReaderLike | undefined
+  if (persistence?.create === undefined) throw new Error('当前持久化服务不支持创建版本。')
+  const prefix = inheritedSeed(source, plan.boundary)
+  const inherited = prefix.length as SessionLogOffset
+  // Borrow the host's actual class identity without importing profile-local peers.
+  const SessionClass = source.constructor as typeof Session
+  const projections = sessionMessageProjections(ctx)
+  const create = SessionClass.create as unknown as SessionCreateCompat
+  const detached = create(childId, prefix, {
+    version: source.header.version,
+    id: childId,
+    createdAt: Date.now(),
+    isSeeded: inherited > 0,
+    parentSession: source.id,
+    ...source.header.cwd === undefined ? {} : { cwd: source.header.cwd },
+    ...agentPreset === undefined ? {} : { agentPreset },
+  }, inherited, projections)
+  const events = [...detached.snapshotEvents()]
+  appendInheritedInboxReset(events)
+  appendLogSeedEvent(events, 'message-edit/version', plan.version)
+  appendSelectedModel(events, selection)
+  if (plan.manualTurn !== undefined) appendManualTurn(events, plan.manualTurn, true)
+  // Full validation precedes any persistent publication; originals remain untouched.
+  restoreDetachedSession(
+    SessionClass,
+    childId,
+    structuredClone(events),
+    detached.header,
+    inherited,
+    projections,
+  )
+  const handle = await persistence.create(detached.header, { inheritedEventCount: inherited })
+  try {
+    await handle.append(events)
+    await handle.flush()
+  } finally {
+    await handle.close()
+  }
+  try {
+    return await ctx.agents.resume({
+      resumeSessionId: childId,
+      agentOptions: options,
+      ...setup === undefined ? {} : { setup },
+    })
+  } catch (error: unknown) {
+    // The public append-only backend has no delete transaction. Keep the valid
+    // durable branch recoverable and identify it if activating the agent fails.
+    throw new Error(`版本 ${childId} 已保存，但加载 Agent 失败：${error instanceof Error ? error.message : String(error)}`)
   }
 }
 
@@ -570,8 +752,9 @@ async function runOperation(ctx: Context, operation: MessageEditOperation): Prom
     try {
       const events = source.session.snapshotEvents()
       const plan = planOperation(operation, events)
-      const options = agentOptions(events, source.options)
-      const child = await createVersionAgent(ctx, source.session, childId, plan, options)
+      const selection = selectedModel(events, source.options)
+      const options = agentOptions(events, source.options, selection)
+      const child = await createVersionAgent(ctx, source.session, childId, plan, options, selection)
       inverses.push(() => child.dispose())
 
       const workspace = sourceWorkspace(ctx, sourceId)
@@ -598,14 +781,17 @@ function ownVersionEvent(
   record: SessionRecord,
   log: InheritedLog,
 ): VersionProjection | undefined {
-  const ownEvents = log.events.filter((event): event is SessionEvent<'message-edit/version'> => (
-    event.type === 'message-edit/version' && event.seq >= log.inherited
+  // V3→V4 deliberately namespaces unknown ignorable event identities. Accept
+  // the original spelling plus any migration-added `plugin:` wrappers so old
+  // branch provenance remains visible after DSH publishes its V4 successor.
+  const ownEvents = log.events.filter(event => (
+    isMessageEditVersionEventType(event.type) && event.seq >= log.inherited
   ))
   if (ownEvents.length === 0) return undefined
   if (ownEvents.length > 1) {
     throw new Error(`会话 ${record.header.id} 包含多个自身版本效果。`)
   }
-  const event = ownEvents[0]
+  const event = ownEvents[0] as SessionEvent<'message-edit/version'> | undefined
   if (event === undefined) return undefined
   const parent = record.header.parentSession
   if ('schemaVersion' in event.data) {
@@ -667,11 +853,113 @@ interface InheritedLog {
   inherited: number
 }
 
+type SessionSeedEventStateCompat = 'detached' | 'shared-frozen'
+
+/** Opaque bridge for projection definitions introduced after the oldest
+ * supported DSH type baseline. The host owns and validates their shape. */
+type SessionMessageProjectionCompat = unknown
+
+interface SessionStoreProjectionCompat {
+  readonly messageProjections?: readonly SessionMessageProjectionCompat[]
+}
+
+function isMessageEditVersionEventType(type: string): boolean {
+  let identity = type
+  while (identity.startsWith('plugin:')) identity = identity.slice('plugin:'.length)
+  return identity === 'message-edit/version'
+}
+
+interface SessionCreateCompat {
+  (
+    id: SessionId,
+    seed?: readonly SessionEvent[],
+    header?: Session['header'],
+    inheritedEventCount?: SessionLogOffset,
+    projections?: readonly SessionMessageProjectionCompat[],
+  ): Session
+}
+
+type PersistenceReadResultCompat = readonly SessionEvent[] | {
+  readonly events: readonly SessionEvent[]
+  readonly eventState: SessionSeedEventStateCompat
+}
+
+interface SessionRestoreCompat {
+  (
+    id: SessionId,
+    seed: readonly SessionEvent[],
+    header: Session['header'],
+    inheritedEventCount: SessionLogOffset,
+    eventState?: SessionSeedEventStateCompat,
+    projections?: readonly SessionMessageProjectionCompat[],
+  ): Session
+}
+
+/** Borrow the active profile's projection catalog when available. Detached
+ * replay must receive the same interpreters as live SessionStore operations. */
+function sessionMessageProjections(
+  ctx: Context,
+): readonly SessionMessageProjectionCompat[] | undefined {
+  const projections = (ctx.sessions as unknown as SessionStoreProjectionCompat).messageProjections
+  return Array.isArray(projections) ? projections : undefined
+}
+
+/** DSH v3 requires an explicit seed ownership state; older runtimes ignore the
+ * extra JavaScript argument. Keep this boundary structural so one bundle can
+ * still load against the supported v2-era profile peers. */
+function restoreDetachedSession(
+  SessionClass: typeof Session,
+  id: SessionId,
+  events: readonly SessionEvent[],
+  header: Session['header'],
+  inheritedEventCount: SessionLogOffset,
+  projections?: readonly SessionMessageProjectionCompat[],
+): Session {
+  const restore = SessionClass.fromRestore as unknown as SessionRestoreCompat
+  return restore(id, events, header, inheritedEventCount, 'detached', projections)
+}
+
+function persistenceEvents(result: PersistenceReadResultCompat): readonly SessionEvent[] {
+  if (Array.isArray(result)) return result
+  const wrapped = result as Exclude<PersistenceReadResultCompat, readonly SessionEvent[]>
+  if (typeof wrapped === 'object' && wrapped !== null && Array.isArray(wrapped.events)) {
+    return wrapped.events
+  }
+  throw new Error('持久化服务返回了不支持的会话读取结果。')
+}
+
 /** Minimal read face of the optional persistence service; borrowed events are
  * consumed synchronously inside one timeline projection. */
 interface PersistenceReaderLike {
-  inspect(sessionId: SessionId, signal?: AbortSignal): Promise<{ events: readonly SessionEvent[]; inheritedEventCount?: number }>
-  readFrom(sessionId: SessionId, fromSeq: number, signal?: AbortSignal): Promise<{ events: readonly SessionEvent[]; inheritedEventCount?: number }>
+  inspect?(sessionId: SessionId, signal?: AbortSignal): Promise<{ events: readonly SessionEvent[]; inheritedEventCount?: number }>
+  open?(sessionId: SessionId, access: 'read'): Promise<{
+    inheritedEventCount: number
+    read(): Promise<PersistenceReadResultCompat>
+    close(): Promise<void>
+  }>
+  create?(header: Session['header'], options: { inheritedEventCount: SessionLogOffset }): Promise<{
+    append(events: readonly SessionEvent[]): Promise<void>
+    flush(): Promise<void>
+    close(): Promise<void>
+  }>
+}
+
+async function readStoredLog(ctx: Context, sessionId: SessionId): Promise<InheritedLog> {
+  const persistence = ctx.get('sessionPersistence') as PersistenceReaderLike | undefined
+  if (persistence?.open !== undefined) {
+    const handle = await persistence.open(sessionId, 'read')
+    try {
+      return { events: persistenceEvents(await handle.read()), inherited: handle.inheritedEventCount }
+    } finally {
+      await handle.close()
+    }
+  }
+  if (persistence?.inspect !== undefined) {
+    const inspection = await persistence.inspect(sessionId)
+    return { events: inspection.events, inherited: inspection.inheritedEventCount ?? 0 }
+  }
+  const snapshot = await ctx.sessionQuery.readSession(sessionId)
+  return { events: snapshot.events, inherited: snapshot.inheritedEventCount ?? 0 }
 }
 
 /** Bounded parallel inspection of persisted branches; matches the corpus worker shape. */
@@ -701,13 +989,7 @@ async function mapConcurrent<T, R>(
 async function readCurrentLog(ctx: Context, sessionId: SessionId): Promise<InheritedLog> {
   const live = ctx.sessions.get(sessionId)
   if (live !== undefined) return { events: live.snapshotEvents(), inherited: live.inheritedEventCount }
-  const persistence = ctx.get('sessionPersistence') as PersistenceReaderLike | undefined
-  if (persistence !== undefined) {
-    const inspection = await persistence.inspect(sessionId)
-    return { events: inspection.events, inherited: inspection.inheritedEventCount ?? 0 }
-  }
-  const snapshot = await ctx.sessionQuery.readSession(sessionId)
-  return { events: snapshot.events, inherited: snapshot.inheritedEventCount ?? 0 }
+  return readStoredLog(ctx, sessionId)
 }
 
 /** Own-version scan window for one lineage node: the tail from the durable
@@ -717,13 +999,7 @@ async function versionLog(ctx: Context, record: SessionRecord): Promise<Inherite
   if (live !== undefined) {
     return { events: live.snapshotEvents(live.inheritedEventCount), inherited: live.inheritedEventCount }
   }
-  const persistence = ctx.get('sessionPersistence') as PersistenceReaderLike | undefined
-  if (persistence !== undefined) {
-    const inspection = await persistence.inspect(record.header.id)
-    return { events: inspection.events, inherited: inspection.inheritedEventCount ?? 0 }
-  }
-  const snapshot = await ctx.sessionQuery.readSession(record.header.id)
-  return { events: snapshot.events, inherited: snapshot.inheritedEventCount ?? 0 }
+  return readStoredLog(ctx, record.header.id)
 }
 
 async function timeline(ctx: Context, sessionId: SessionId): Promise<MessageEditTimeline> {

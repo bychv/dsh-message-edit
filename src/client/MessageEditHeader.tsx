@@ -1,6 +1,6 @@
 import { useEffect, type ReactNode } from 'react'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { MessageEditFace } from './controller.ts'
+import type { MessageEditFace, MessageEditState } from './controller.ts'
 import { InlineMessageEdit } from './InlineMessageEdit.tsx'
 import styles from './MessageEditHeader.module.css'
 
@@ -16,7 +16,7 @@ export function MessageEditHeader({
   edit,
   retry,
 }: MessageEditHeaderProps): ReactNode {
-  const state = useMessageEdit(value => value)
+  const state = useMessageEdit((value: MessageEditState) => value)
 
   useEffect(() => {
     const release = acquire()

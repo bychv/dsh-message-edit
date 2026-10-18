@@ -16,16 +16,25 @@
 dsh plugin --profile web add github:bychv/dsh-message-edit#main
 ```
 
-> **从 DSH 0.1.2 升级前请先迁移历史：** 不要先升级 DSH，也不要先切换到本仓库的
-> `alpha` 分支。请保持旧版 DSH 停止运行，在当前 `main` 分支中执行
-> [`migrate:history`](#升级-dsh-前迁移历史记录)，确认迁移成功后再升级。该工具专门用于把
-> 0.1.2 时代的会话预先转换为新版可加载的 format v3，避免升级后才发现旧聊天记录无法打开。
+> **从 DSH 0.1.2 升级前请先迁移历史：** 请在旧 DSH 停止运行、且新版尚未接管历史时，
+> 执行本仓库的 [`migrate:history`](#升级-dsh-前迁移历史记录)，确认成功后再升级 DSH 和插件。
+> 该工具把 0.1.2 时代的会话预先转换为新版可加载的 format v3；直接升级可能导致旧记录无法打开。
 
-本 fork 当前预发布版本为 `0.2.5-alpha.1`，已支持 DeepSeek Harness `0.1.2-rc.1`，并提供升级到新版 DSH 前使用的历史记录迁移工具。插件版本号中的 `alpha` 后缀不表示仅支持 DSH alpha 版本。
+本 fork 当前预发布版本为 `0.2.6-alpha.7`，适配并以 DeepSeek Harness `0.1.7-rc.2`（Session format V4）为测试基线，同时保留旧版会话格式的运行时兼容路径。
 
-如使用 DSH alpha 版本，请切换到本仓库的 [`alpha` 分支](https://github.com/bychv/dsh-message-edit/tree/alpha)获取对应的兼容性修复。
+本次修复包括：将 Host、Browser 与构建依赖对齐到 DSH `0.1.7-rc.2` 及 Cordis `4.0.4`；编辑或重试时继承下方输入框当前选择的 provider、model 与 reasoning effort，并把该选择写入新分支，使切换后的模型控件与实际请求路由保持一致；适配 Session format V4 的严格持久化校验及 0.1.7 中更名后的 `@deepseek-ai/dsh-agent-preset-registry`；识别 V3→V4 迁移后被 DSH 命名空间化为 `plugin:message-edit/version` 的旧版本事件，并允许从迁移后的会话继续编辑和创建二级分支。此前的 format v3 事件所有权、宿主消息投影、持久化 inbox 清理及嵌入式空助手 `stream` 兼容逻辑继续保留；新建的 `message-edit/*` 事件仍带有 `ignorable: true`。
 
-兼容性验证：使用官方 `@deepseek-ai/dsh-* @0.1.2-rc.1` 依赖完成 Host / Browser TypeScript 类型检查，7 项回归测试全部通过，覆盖插件加载、编辑分支继承、历史冷读、版本链、retry 输入保留及升级前历史迁移。本次 rc.1 验证不包含真实模型调用；此前已在 DSH `0.1.2-alpha.5` 上完成本机浏览器验证。
+> **旧数据升级限制：** “兼容旧版运行时”不等于已有 format v2 插件分支可直接迁移到 format v3。DSH 的内置 v2→v3 迁移器可能在插件加载前拒绝 `message-edit/version` 事件；本插件无法在正常启动流程中拦截这一阶段。升级前请先备份，并运行下方的预迁移工具。已经升级而无法加载的记录，不能依靠安装新版插件自动修复。
+
+### 从 Session V3 迁移到 V4
+
+DSH `0.1.7-rc.2` 的 JSONL 持久化层负责 V3→V4 物理迁移，本插件不会绕过或改写该流程：
+
+1. 第一次只读打开 V3 会话时，DSH 在内存中准备并校验 V4 结果，不写文件；原 `session.v3.jsonl(.zstd)` 保持不变。
+2. 第一次以写方式恢复该会话时，DSH 校验后发布并使用新的 `session.v4.jsonl(.zstd)`，同时保留原 V3 generation，不做覆盖式迁移。
+3. V3 中的 `message-edit/version` 属于未知但可忽略的插件事件，迁移器会将其命名为 `plugin:message-edit/version`。本版同时识别原名和迁移名（也容忍未来重复的 `plugin:` 包装），因此版本树、撤销/重施加以及迁移后再次编辑都能继续工作。
+
+升级 profile 前仍建议完整备份会话目录。Timeline 的只读浏览不会强制发布 V4 文件；恢复会话、继续对话或执行编辑等写路径才会触发 DSH 的惰性发布。此处迁移兼容已用 alpha 沙盒中的真实 JSONL backend 验证，包括 V3 只读准备、V4 后继发布、原 V3 文件保留、V4 冷重载和迁移后二次分支。
 
 Host 通过 DSH 注入的服务运行，`SessionLogOffset` 仅作为编译期类型使用，不在运行时从
 profile 的 `@deepseek-ai/dsh-session` 导入。这避免了 CLI 已升级、profile 尚保留旧 peer
@@ -56,25 +65,27 @@ profile 的 `@deepseek-ai/dsh-session` 导入。这避免了 CLI 已升级、pro
 
 ### 分支与 Agent 接线
 
-旧实现先用短生命周期 Session 暂存分支、落盘、移除 live Session，再用 `agents.resume()` 重建 Agent。这个过程存在两个分离的生命周期边界：暂存日志已经持久化后，Agent 仍可能创建失败。现实现只使用 `AgentRegistry.create()` 已公开的 `seed + meta` 事务缝：
+根据来源 Session 的格式选择公开 API：
 
-1. 在来源 Agent 的 runMaintenance() 内，从已闭合边界取得不可变 seed；第一回合之前使用空 seed。
-2. 用本地等价的纯事件构造器把版本效果对与可选手工助手回合加入 seed，再调用 `ctx.agents.create({ seed, meta })`。Session 在 Agent 构造前一次性验证完整 seed；任何一步失败都会由 AgentFactory 的结构性逆撤销，外部观察者看不到半成品 Session，Agent 的回合计数也直接从完整历史初始化。
-3. 发布后调用 `ctx.sessions.flush()`，在 HTTP 操作成功前建立耐久性屏障。
-4. Workspace 挂接与 child Agent 生命周期分别返回原子逆；操作失败时按相反顺序组合恢复。随后通过 `child.agent.followup()` 排入需要重新执行的用户输入。
+1. 在来源 Agent 的 `runMaintenance()` 内，从已闭合边界取得不可变前缀；第一回合之前使用空前缀。
+2. 旧格式仍通过 `ctx.agents.create({ seed, meta })` 创建完整版本，再调用 `ctx.sessions.flush()`。
+3. Format v2+ 的新建 seed 必须完全等于继承前缀。因此先由宿主的 Session 类构造离线前缀和原生继承标记，再添加可忽略的版本事件及手工回合，并通过 `Session.fromRestore()` 完整验证。Format v3/V4 恢复时显式传递 `detached` 事件所有权状态；支持消息投影的宿主还会把 `ctx.sessions.messageProjections` 同步传给离线构造和恢复。验证通过后使用持久化 handle 的 `create/append/flush/close` 保存，再由 `ctx.agents.resume()` 加载完整历史；V4 JSONL backend 会在冷读时执行完整生命周期与事件关系校验。
+4. Workspace 挂接与 child Agent 生命周期分别返回原子逆；随后通过 `child.agent.followup()` 排入需要重新执行的用户输入。
+
+Format v2+ 路径的持久化与 Agent 加载是两个阶段：若版本已保存但 Agent 加载失败，错误会包含已保存的会话 ID，便于恢复。当前公开的 append-only 持久化 API 没有删除事务，不能承诺回滚已经保存的版本；原会话始终不改写。
 
 此路径不接触 `ReactLoopAgent`、AgentLoop 私有方法或 apiproxy 的收窄 fork RPC；分支 seed 仍由同一 Session 公共事件契约验证。
 
 ### 空间可组合性
 
 - Host 只依赖公开的 `sessions`、`agents`、`sessionPersistence`、`sessionQuery`、`workspaceRegistry` 与 `webServer` 服务。
-- Browser 只通过 `slots`、`conversation`、`connection` 与 runtime `sessions` 服务组合。
+- Browser 只通过 `slots`、`conversation`、`connection`、runtime `sessions` 与 `uiWorkspace` 导航服务组合。
 - Timeline 与标题栏共享一个按 `sessionId` 建立的值级 Snapshot source；控制器反应式订阅当前 Session 的闭合回合值与 Session 列表中的谱系值，Session 身份替换时重新绑定，不缓存旧 Session 对象。
-- 新版本导航等待 runtime Session 列表发布对应 ID 后再执行 `ctx.sessions.open()`，依赖可用性变化直接驱动导航。
+- 新版本导航等待 runtime Session 列表发布对应 ID 后再执行 `ctx.uiWorkspace.openSession()`，依赖可用性变化直接驱动导航。
 
 ## 数据模型
 
-每个插件版本在自己的非继承后缀中包含一个 `message-edit/version` 事件：
+每个插件版本在自己的非继承后缀中包含一个 `message-edit/version` 事件；由 V3 升级而来的 V4 历史中，该事件名为 `plugin:message-edit/version`，两者语义相同：
 
 该插件自定义事件在 seed 信封中带有 `ignorable: true`。这样 DeepSeek Harness 0.1.2-alpha
 及其他启用未知事件保护的版本可以安全跳过不认识的 `message-edit/*` 事件，冷启动或重新加载时
@@ -125,14 +136,14 @@ npm install
 npm run build
 ```
 
-构建基于 npm 发布的 `@deepseek-ai/*@0.1.2-alpha.5` 类型与本地工具链（typescript、tsdown、lightningcss），不再依赖 dsh 源码树。构建生成：
+构建基于 npm 发布的 `@deepseek-ai/*@0.1.7-rc.2` 类型与本地工具链（typescript、tsdown、lightningcss），不再依赖 dsh 源码树。构建生成：
 
 - `index.mjs`：Host 插件
 - `client.js`：Browser 插件
 - `client.js.map`：Browser source map
 
 运行 `npm test` 会先重新构建，再检查旧 profile peer 下的 Host 加载、真实 Session seed
-验证、分支继承边界、`ignorable` 标记、历史冷读、retry 输入保留及 v3 迁移；测试不调用模型、不写用户历史。
+验证、分支继承边界、`ignorable` 标记、历史冷读、retry 输入保留、升级前 V3 迁移及 V4 迁移事件名；测试不调用模型、不写用户历史。
 
 ## 升级 DSH 前迁移历史记录
 
@@ -146,7 +157,7 @@ npm run build
 
 推荐顺序：
 
-1. 保留 DSH `0.1.2` 和本插件 `main` 分支，停止所有 DSH 进程。
+1. 保留 DSH `0.1.2` 环境，停止所有 DSH 进程；使用本仓库 `main` 分支提供的迁移脚本。
 2. 备份整个 `DSH_HOME`；Windows 默认通常是 `%USERPROFILE%\.dsh`，但请以自己的实际配置为准。
 3. 在本仓库 `main` 分支目录安装依赖，先执行 dry-run（只读检查）：
 
@@ -161,8 +172,8 @@ npm run migrate:history -- --dsh-home "你的 DSH_HOME 绝对路径"
 npm run migrate:history -- --dsh-home "你的 DSH_HOME 绝对路径" --apply
 ```
 
-5. 再运行一次 dry-run；已迁移会话应不再被选中。随后升级 DSH，并把插件切换到与新版
-   DSH 对应的 `alpha` 分支。迁移完成后不要再用旧版 DSH 继续产生会话。
+5. 再运行一次 dry-run；已迁移会话应不再被选中。随后升级 DSH，并安装此 `main` 分支插件。
+   迁移完成后不要再用旧版 DSH 继续产生会话。
 
 迁移过程不会删除或改写旧的 `session.jsonl*`：旧文件仍会保留，新版 DSH 会优先读取同目录的
 v3 文件。同时，工具会在 `DSH_HOME/backups/dsh-message-edit-v3-时间戳/` 下保存逐文件备份和
@@ -176,6 +187,8 @@ npm run migrate:history -- --dsh-home "你的 DSH_HOME 绝对路径" --apply --b
 不要继续升级。工具不会猜测 `DSH_HOME`，必须显式传入绝对路径，以免迁移到错误的数据目录。
 运行 `npm run migrate:history -- --help` 可查看全部参数。
 
+测试也支持通过 `DSH_TEST_SESSION_MODULE` 指定沙盒中已构建的 `dsh-session` 模块绝对 file URL，再运行 `node --test tests/compatibility.test.mjs`。同时设置 `DSH_TEST_JSONL_MODULE` 与 `DSH_TEST_CORDIS_MODULE` 时，还会使用目标沙盒的真实 JSONL backend 验证 V4 原生写入和 V3→V4 惰性迁移；未设置时该项自动跳过。Agent 执行仍使用测试替身，不调用模型或用户 profile。
+
 ## 安装
 
 安装此个人 fork 请使用完整的 GitHub 来源及 `#main` 分支，不要以 npm 同名包替代：
@@ -184,7 +197,7 @@ npm run migrate:history -- --dsh-home "你的 DSH_HOME 绝对路径" --apply --b
 dsh plugin --profile web add github:bychv/dsh-message-edit#main
 ```
 
-该命令直接安装此 fork 的 `main` 分支版本（已支持 DSH `0.1.2-rc.1`）。安装完成后重启 dsh；如曾从 npm 或本仓库的 `alpha` 分支安装同名包，`add` 会将 web profile 中的依赖来源更新为上述 GitHub 分支。包名仍保留为 `dsh-message-edit`，因此它会替换该 profile 中的同名依赖，而不是与原包并存。
+该命令直接安装此 fork 的 `main` 分支版本（以 DSH `0.1.7-rc.2` 为测试基线）。安装完成后重启 dsh；如曾从 npm 或本仓库的 `alpha` 分支安装同名包，`add` 会将 web profile 中的依赖来源更新为上述 GitHub 分支。包名仍保留为 `dsh-message-edit`，因此它会替换该 profile 中的同名依赖，而不是与原包并存。
 
 或本地开发：
 

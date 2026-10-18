@@ -231,15 +231,57 @@ function planOperation(operation, events) {
 		case "retry": return retryPlan(operation.sessionId, operation.turn, operation.cascade, turns);
 	}
 }
-function agentOptions(events, fallback) {
-	const config = events.findLast((event) => event.type === "request/header")?.data.header.config;
-	const provider = config?.provider ?? fallback?.provider;
-	const model = config?.model ?? fallback?.model;
+function sameModelSelection(left, right) {
+	return left?.provider === right.provider && left.model === right.model && left.reasoningEffort === right.reasoningEffort;
+}
+/** Mirror API Session's durable model-selection projection so a branch can
+* carry the composer's next-request choice even when its target cut predates
+* the corresponding model/selection event. */
+function projectedModelSelection(events) {
+	let lastUsed;
+	let pending;
+	for (const event of events) {
+		if (event.type === "model/selection") {
+			pending = event.data;
+			continue;
+		}
+		if (event.type !== "request/header") continue;
+		const config = event.data.header.config;
+		lastUsed = {
+			provider: config.provider,
+			model: config.model,
+			...config.reasoningEffort === void 0 ? {} : { reasoningEffort: String(config.reasoningEffort) }
+		};
+		if (sameModelSelection(pending, lastUsed)) pending = void 0;
+	}
+	return {
+		...lastUsed === void 0 ? {} : { lastUsed },
+		...pending === void 0 ? {} : { pending }
+	};
+}
+function selectedModel(events, fallback) {
+	const projected = projectedModelSelection(events);
+	const selected = projected.pending ?? projected.lastUsed;
+	if (selected !== void 0) return selected;
+	const assistant = events.findLast((event) => event.type === "assistant/message")?.data.message.source;
+	const provider = fallback?.provider ?? assistant?.provider;
+	const model = fallback?.model ?? assistant?.model;
 	if (provider === void 0 || provider.length === 0 || model === void 0 || model.length === 0) throw new Error("无法从会话历史解析模型路由。");
-	const maxTokens = config?.maxTokens ?? fallback?.maxTokens;
 	return {
 		provider,
 		model,
+		...fallback?.reasoningEffort === void 0 ? {} : { reasoningEffort: fallback.reasoningEffort }
+	};
+}
+function agentOptions(events, fallback, selection = selectedModel(events, fallback)) {
+	const config = events.findLast((event) => event.type === "request/header")?.data.header.config;
+	const { provider: _provider, model: _model, reasoningEffort: _reasoningEffort, maxTokens: _maxTokens, ...extensions } = fallback ?? {};
+	const maxTokens = config?.maxTokens ?? fallback?.maxTokens;
+	return {
+		...extensions,
+		provider: selection.provider,
+		model: selection.model,
+		...selection.reasoningEffort === void 0 ? {} : { reasoningEffort: selection.reasoningEffort },
 		...maxTokens === void 0 ? {} : { maxTokens }
 	};
 }
@@ -247,7 +289,7 @@ async function withSourceAgent(ctx, sessionId, operation) {
 	let handle;
 	let agent = ctx.agents.get(sessionId);
 	if (agent === void 0) {
-		const snapshot = await ctx.sessionQuery.readSession(sessionId);
+		const snapshot = await readStoredLog(ctx, sessionId);
 		handle = await ctx.agents.resume({
 			resumeSessionId: sessionId,
 			agentOptions: agentOptions(snapshot.events)
@@ -287,7 +329,33 @@ function appendSurfaceSeedEvent(events, type, data, intent) {
 		...intent.sourceEventSeqs === void 0 ? {} : { sourceEventSeqs: intent.sourceEventSeqs }
 	});
 }
-function appendManualTurn(events, manual) {
+/** A user prompt is durably inserted before turn/start and claimed after it.
+* Forking immediately before the turn therefore inherits the insertion but not
+* its matching removal. Cancel that inherited inbox state before publishing the
+* branch; the operation plan will enqueue exactly the intended replacement. */
+function appendInheritedInboxReset(events) {
+	const pending = {
+		"next-turn": [],
+		"next-step": []
+	};
+	for (const event of events) {
+		if (event.type !== "agent/inbox/spliced") continue;
+		const splice = event.data;
+		pending[splice.target].splice(splice.start, splice.removedCount ?? 0, ...splice.inserted);
+	}
+	for (const target of ["next-step", "next-turn"]) {
+		const removedCount = pending[target].length;
+		if (removedCount === 0) continue;
+		appendLogSeedEvent(events, "agent/inbox/spliced", {
+			target,
+			start: 0,
+			removedCount,
+			inserted: [],
+			outcome: "canceled"
+		});
+	}
+}
+function appendManualTurn(events, manual, embeddedStream) {
 	const { turn, user, assistant } = manual;
 	appendLogSeedEvent(events, "turn/start", { turn });
 	appendSurfaceSeedEvent(events, "user/message", user, { surfaceOp: "append" });
@@ -298,10 +366,11 @@ function appendManualTurn(events, manual) {
 	appendSurfaceSeedEvent(events, "assistant/message", {
 		turn,
 		step: 1,
-		message: assistant
+		message: assistant,
+		...embeddedStream ? { stream: [] } : {}
 	}, {
 		surfaceOp: "append",
-		sourceEventSeqs: []
+		...embeddedStream ? {} : { sourceEventSeqs: [] }
 	});
 	appendLogSeedEvent(events, "step/end", {
 		turn,
@@ -312,11 +381,18 @@ function appendManualTurn(events, manual) {
 		reason: { kind: "completed" }
 	});
 }
-function versionSeed(source, plan) {
+function appendSelectedModel(events, selection) {
+	const projected = projectedModelSelection(events);
+	if (sameModelSelection(projected.pending ?? projected.lastUsed, selection)) return;
+	appendLogSeedEvent(events, "model/selection", selection);
+}
+function versionSeed(source, plan, selection) {
 	const events = inheritedSeed(source, plan.boundary);
 	const inheritedLength = events.length;
+	appendInheritedInboxReset(events);
 	appendLogSeedEvent(events, "message-edit/version", plan.version);
-	if (plan.manualTurn !== void 0) appendManualTurn(events, plan.manualTurn);
+	appendSelectedModel(events, selection);
+	if (plan.manualTurn !== void 0) appendManualTurn(events, plan.manualTurn, source.header.version >= 2);
 	return {
 		events,
 		inheritedLength
@@ -330,8 +406,7 @@ function sessionPreset(session) {
 	}
 	return session.header.agentPreset;
 }
-async function createVersionAgent(ctx, source, childId, plan, options) {
-	const seed = versionSeed(source, plan);
+async function createVersionAgent(ctx, source, childId, plan, options, selection) {
 	const presets = ctx.get("agentPresets");
 	const presetId = sessionPreset(source);
 	let agentPreset;
@@ -343,6 +418,8 @@ async function createVersionAgent(ctx, source, childId, plan, options) {
 			await presets.mount(agentCtx, resolved);
 		};
 	}
+	if (source.header.version >= 2) return createStoredVersionAgent(ctx, source, childId, plan, options, selection, agentPreset, setup);
+	const seed = versionSeed(source, plan, selection);
 	const seeded = seed.inheritedLength > 0;
 	const child = await ctx.agents.create({
 		sessionId: childId,
@@ -365,6 +442,51 @@ async function createVersionAgent(ctx, source, childId, plan, options) {
 		throw error;
 	}
 }
+/** Format v2+ permits only inherited events in a fresh seeded constructor.
+* Validate the complete branch off-store, then transfer it through the public
+* persistence/restore boundary. This preserves both the inherited cut and the
+* ignorable extension envelope, which Session.append cannot currently express.
+*/
+async function createStoredVersionAgent(ctx, source, childId, plan, options, selection, agentPreset, setup) {
+	const persistence = ctx.get("sessionPersistence");
+	if (persistence?.create === void 0) throw new Error("当前持久化服务不支持创建版本。");
+	const prefix = inheritedSeed(source, plan.boundary);
+	const inherited = prefix.length;
+	const SessionClass = source.constructor;
+	const projections = sessionMessageProjections(ctx);
+	const create = SessionClass.create;
+	const detached = create(childId, prefix, {
+		version: source.header.version,
+		id: childId,
+		createdAt: Date.now(),
+		isSeeded: inherited > 0,
+		parentSession: source.id,
+		...source.header.cwd === void 0 ? {} : { cwd: source.header.cwd },
+		...agentPreset === void 0 ? {} : { agentPreset }
+	}, inherited, projections);
+	const events = [...detached.snapshotEvents()];
+	appendInheritedInboxReset(events);
+	appendLogSeedEvent(events, "message-edit/version", plan.version);
+	appendSelectedModel(events, selection);
+	if (plan.manualTurn !== void 0) appendManualTurn(events, plan.manualTurn, true);
+	restoreDetachedSession(SessionClass, childId, structuredClone(events), detached.header, inherited, projections);
+	const handle = await persistence.create(detached.header, { inheritedEventCount: inherited });
+	try {
+		await handle.append(events);
+		await handle.flush();
+	} finally {
+		await handle.close();
+	}
+	try {
+		return await ctx.agents.resume({
+			resumeSessionId: childId,
+			agentOptions: options,
+			...setup === void 0 ? {} : { setup }
+		});
+	} catch (error) {
+		throw new Error(`版本 ${childId} 已保存，但加载 Agent 失败：${error instanceof Error ? error.message : String(error)}`);
+	}
+}
 function sourceWorkspace(ctx, sessionId) {
 	return ctx.workspaceRegistry.list().find((workspace) => workspace.sessionIds.includes(sessionId));
 }
@@ -385,8 +507,9 @@ async function runOperation(ctx, operation) {
 		try {
 			const events = source.session.snapshotEvents();
 			const plan = planOperation(operation, events);
-			const options = agentOptions(events, source.options);
-			const child = await createVersionAgent(ctx, source.session, childId, plan, options);
+			const selection = selectedModel(events, source.options);
+			const options = agentOptions(events, source.options, selection);
+			const child = await createVersionAgent(ctx, source.session, childId, plan, options, selection);
 			inverses.push(() => child.dispose());
 			const workspace = sourceWorkspace(ctx, sourceId);
 			if (workspace !== void 0) {
@@ -410,7 +533,7 @@ async function runOperation(ctx, operation) {
 	});
 }
 function ownVersionEvent(record, log) {
-	const ownEvents = log.events.filter((event) => event.type === "message-edit/version" && event.seq >= log.inherited);
+	const ownEvents = log.events.filter((event) => isMessageEditVersionEventType(event.type) && event.seq >= log.inherited);
 	if (ownEvents.length === 0) return void 0;
 	if (ownEvents.length > 1) throw new Error(`会话 ${record.header.id} 包含多个自身版本效果。`);
 	const event = ownEvents[0];
@@ -462,6 +585,56 @@ function flattenLineage(root, descendants) {
 	visit(descendants, 1);
 	return result;
 }
+function isMessageEditVersionEventType(type) {
+	let identity = type;
+	while (identity.startsWith("plugin:")) identity = identity.slice(7);
+	return identity === "message-edit/version";
+}
+/** Borrow the active profile's projection catalog when available. Detached
+* replay must receive the same interpreters as live SessionStore operations. */
+function sessionMessageProjections(ctx) {
+	const projections = ctx.sessions.messageProjections;
+	return Array.isArray(projections) ? projections : void 0;
+}
+/** DSH v3 requires an explicit seed ownership state; older runtimes ignore the
+* extra JavaScript argument. Keep this boundary structural so one bundle can
+* still load against the supported v2-era profile peers. */
+function restoreDetachedSession(SessionClass, id, events, header, inheritedEventCount, projections) {
+	const restore = SessionClass.fromRestore;
+	return restore(id, events, header, inheritedEventCount, "detached", projections);
+}
+function persistenceEvents(result) {
+	if (Array.isArray(result)) return result;
+	const wrapped = result;
+	if (typeof wrapped === "object" && wrapped !== null && Array.isArray(wrapped.events)) return wrapped.events;
+	throw new Error("持久化服务返回了不支持的会话读取结果。");
+}
+async function readStoredLog(ctx, sessionId) {
+	const persistence = ctx.get("sessionPersistence");
+	if (persistence?.open !== void 0) {
+		const handle = await persistence.open(sessionId, "read");
+		try {
+			return {
+				events: persistenceEvents(await handle.read()),
+				inherited: handle.inheritedEventCount
+			};
+		} finally {
+			await handle.close();
+		}
+	}
+	if (persistence?.inspect !== void 0) {
+		const inspection = await persistence.inspect(sessionId);
+		return {
+			events: inspection.events,
+			inherited: inspection.inheritedEventCount ?? 0
+		};
+	}
+	const snapshot = await ctx.sessionQuery.readSession(sessionId);
+	return {
+		events: snapshot.events,
+		inherited: snapshot.inheritedEventCount ?? 0
+	};
+}
 /** Bounded parallel inspection of persisted branches; matches the corpus worker shape. */
 const TIMELINE_READ_CONCURRENCY = 4;
 async function mapConcurrent(items, worker) {
@@ -487,19 +660,7 @@ async function readCurrentLog(ctx, sessionId) {
 		events: live.snapshotEvents(),
 		inherited: live.inheritedEventCount
 	};
-	const persistence = ctx.get("sessionPersistence");
-	if (persistence !== void 0) {
-		const inspection = await persistence.inspect(sessionId);
-		return {
-			events: inspection.events,
-			inherited: inspection.inheritedEventCount ?? 0
-		};
-	}
-	const snapshot = await ctx.sessionQuery.readSession(sessionId);
-	return {
-		events: snapshot.events,
-		inherited: snapshot.inheritedEventCount ?? 0
-	};
+	return readStoredLog(ctx, sessionId);
 }
 /** Own-version scan window for one lineage node: the tail from the durable
 * inheritance cut is enough, and root nodes cannot carry a version effect. */
@@ -509,19 +670,7 @@ async function versionLog(ctx, record) {
 		events: live.snapshotEvents(live.inheritedEventCount),
 		inherited: live.inheritedEventCount
 	};
-	const persistence = ctx.get("sessionPersistence");
-	if (persistence !== void 0) {
-		const inspection = await persistence.inspect(record.header.id);
-		return {
-			events: inspection.events,
-			inherited: inspection.inheritedEventCount ?? 0
-		};
-	}
-	const snapshot = await ctx.sessionQuery.readSession(record.header.id);
-	return {
-		events: snapshot.events,
-		inherited: snapshot.inheritedEventCount ?? 0
-	};
+	return readStoredLog(ctx, record.header.id);
 }
 async function timeline(ctx, sessionId) {
 	const targetTrace = await ctx.sessionQuery.traceSession(sessionId);
