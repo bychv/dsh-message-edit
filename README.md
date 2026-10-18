@@ -16,15 +16,15 @@
 dsh plugin --profile web add github:bychv/dsh-message-edit#alpha
 ```
 
-本 fork 当前预发布版本为 `0.2.6-alpha.6`，适配并以 DeepSeek Harness `0.1.7-rc.1`（Session format V4）为测试基线，同时保留旧版会话格式的运行时兼容路径。
+本 fork 当前预发布版本为 `0.2.6-alpha.7`，适配并以 DeepSeek Harness `0.1.7-rc.2`（Session format V4）为测试基线，同时保留旧版会话格式的运行时兼容路径。
 
-本次修复包括：将 Host、Browser 与构建依赖完整对齐到 DSH `0.1.7-rc.1` 及 Cordis `4.0.4`；编辑或重试时继承下方输入框当前选择的 provider、model 与 reasoning effort，并把该选择写入新分支，使切换后的模型控件与实际请求路由保持一致；适配 Session format V4 的严格持久化校验及 0.1.7 中更名后的 `@deepseek-ai/dsh-agent-preset-registry`；识别 V3→V4 迁移后被 DSH 命名空间化为 `plugin:message-edit/version` 的旧版本事件，并允许从迁移后的会话继续编辑和创建二级分支。此前的 format v3 事件所有权、宿主消息投影、持久化 inbox 清理及嵌入式空助手 `stream` 兼容逻辑继续保留；新建的 `message-edit/*` 事件仍带有 `ignorable: true`。
+本次修复包括：将 Host、Browser 与构建依赖对齐到 DSH `0.1.7-rc.2` 及 Cordis `4.0.4`；编辑或重试时继承下方输入框当前选择的 provider、model 与 reasoning effort，并把该选择写入新分支，使切换后的模型控件与实际请求路由保持一致；适配 Session format V4 的严格持久化校验及 0.1.7 中更名后的 `@deepseek-ai/dsh-agent-preset-registry`；识别 V3→V4 迁移后被 DSH 命名空间化为 `plugin:message-edit/version` 的旧版本事件，并允许从迁移后的会话继续编辑和创建二级分支。此前的 format v3 事件所有权、宿主消息投影、持久化 inbox 清理及嵌入式空助手 `stream` 兼容逻辑继续保留；新建的 `message-edit/*` 事件仍带有 `ignorable: true`。
 
 > **旧数据升级限制：** “兼容旧版运行时”不等于已有 format v2 插件分支可直接迁移到 format v3。DSH `0.1.5-rc.2` 的内置 v2→v3 迁移器会在插件加载前拒绝未被核心分类的 `message-edit/version` 事件，即使该事件带有 `ignorable: true`；插件无法在正常启动流程中拦截这一阶段。升级含有本插件旧分支的 profile 前请备份数据并保留旧 DSH 环境。此限制仍然存在；本版新增并验证的是已处于 format v3 的插件历史向 V4 迁移，以及迁移后的冷恢复与再次编辑。
 
 ### 从 Session V3 迁移到 V4
 
-DSH `0.1.7-rc.1` 的 JSONL 持久化层负责 V3→V4 物理迁移，本插件不会绕过或改写该流程：
+DSH `0.1.7-rc.2` 的 JSONL 持久化层负责 V3→V4 物理迁移，本插件不会绕过或改写该流程：
 
 1. 第一次只读打开 V3 会话时，DSH 在内存中准备并校验 V4 结果，不写文件；原 `session.v3.jsonl(.zstd)` 保持不变。
 2. 第一次以写方式恢复该会话时，DSH 校验后发布并使用新的 `session.v4.jsonl(.zstd)`，同时保留原 V3 generation，不做覆盖式迁移。
@@ -132,7 +132,7 @@ npm install
 npm run build
 ```
 
-构建基于 npm 发布的 `@deepseek-ai/*@0.1.7-rc.1` 类型与本地工具链（typescript、tsdown、lightningcss），不再依赖 dsh 源码树。构建生成：
+构建基于 npm 发布的 `@deepseek-ai/*@0.1.7-rc.2` 类型与本地工具链（typescript、tsdown、lightningcss），不再依赖 dsh 源码树。构建生成：
 
 - `index.mjs`：Host 插件
 - `client.js`：Browser 插件
